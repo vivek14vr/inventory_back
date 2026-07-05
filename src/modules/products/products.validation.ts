@@ -6,6 +6,10 @@ export const listProductsQuerySchema = paginationQuerySchema.extend({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
+  includeWarehouseThresholds: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
   brandId: z.string().optional(),
   sortBy: z.enum(["name", "brand", "createdAt", "lowStockThreshold"]).optional().default("name"),
 });

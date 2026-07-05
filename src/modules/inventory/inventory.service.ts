@@ -1148,6 +1148,61 @@ export type ProductWarehouseThresholdRow = {
   effectiveLowStockThreshold: number | null;
 };
 
+export type ProductWarehouseLowStockOverride = {
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  lowStockThreshold: number;
+};
+
+export async function getWarehouseLowStockOverridesForProducts(
+  productIds: string[]
+): Promise<Map<string, ProductWarehouseLowStockOverride[]>> {
+  const result = new Map<string, ProductWarehouseLowStockOverride[]>();
+  for (const id of productIds) {
+    result.set(id, []);
+  }
+
+  const validIds = productIds
+    .filter((id) => Types.ObjectId.isValid(id))
+    .map((id) => new Types.ObjectId(id));
+
+  if (validIds.length === 0) return result;
+
+  const balances = await InventoryBalance.find({
+    productId: { $in: validIds },
+    lowStockThreshold: { $exists: true, $ne: null },
+  })
+    .populate<{
+      warehouseId: { _id: Types.ObjectId; name: string; code: string; isActive?: boolean };
+    }>("warehouseId", "name code isActive")
+    .lean();
+
+  for (const balance of balances) {
+    if (balance.lowStockThreshold == null) continue;
+    const warehouse = balance.warehouseId;
+    if (!warehouse || typeof warehouse !== "object") continue;
+    if (warehouse.isActive === false) continue;
+
+    const productId = String(balance.productId);
+    const list = result.get(productId) ?? [];
+    list.push({
+      warehouseId: String(warehouse._id),
+      warehouseName: warehouse.name,
+      warehouseCode: warehouse.code,
+      lowStockThreshold: balance.lowStockThreshold,
+    });
+    result.set(productId, list);
+  }
+
+  for (const [productId, list] of result) {
+    list.sort((a, b) => a.warehouseName.localeCompare(b.warehouseName));
+    result.set(productId, list);
+  }
+
+  return result;
+}
+
 export async function listProductWarehouseThresholds(
   productId: string
 ): Promise<ProductWarehouseThresholdRow[]> {

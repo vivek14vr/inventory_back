@@ -11,6 +11,7 @@ import {
   mongoSort,
 } from "../../shared/pagination/pagination.js";
 import { normalizeProductName } from "../../shared/utils/productName.js";
+import { getWarehouseLowStockOverridesForProducts } from "../inventory/inventory.service.js";
 import type {
   CreateProductInput,
   ListProductsQuery,
@@ -149,6 +150,16 @@ export async function listProducts(query: ListProductsQuery) {
       const cmp = a.brand.name.localeCompare(b.brand.name);
       return query.sortOrder === "asc" ? cmp : -cmp;
     });
+  }
+
+  if (query.includeWarehouseThresholds) {
+    const overrides = await getWarehouseLowStockOverridesForProducts(
+      items.map((item) => item.id)
+    );
+    items = items.map((item) => ({
+      ...item,
+      warehouseLowStockOverrides: overrides.get(item.id) ?? [],
+    }));
   }
 
   return {
