@@ -119,12 +119,16 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     "units in carton",
     "units per carton",
     "units per pack",
+    "units in a box",
+    "units per box",
     "pieces per carton",
   ]);
   const lowPackKey = findColumnKey(keys, [
     "low quantity cartoon",
     "low quantity carton",
     "low stock carton",
+    "low quantity box",
+    "low stock box",
     "low stock",
     "low quantity",
   ]);
