@@ -1,2 +1,15 @@
 .env
 .env.example
+
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# leftover monorepo folders (this repo is backend-only at root)
+backend/
+frontend/
+
+# OS
+.DS_Store
