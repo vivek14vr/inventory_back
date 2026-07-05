@@ -1,0 +1,1369 @@
+import { Types } from "mongoose";
+import type { ClientSession } from "mongoose";
+import { AuditLog } from "../../models/AuditLog.js";
+import { Brand } from "../../models/Brand.js";
+import { InventoryBalance } from "../../models/InventoryBalance.js";
+import { Product } from "../../models/Product.js";
+import { StockMovement } from "../../models/StockMovement.js";
+import { Transfer } from "../../models/Transfer.js";
+import { Warehouse } from "../../models/Warehouse.js";
+import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
+import type { AuthUser } from "../../shared/types/auth.js";
+import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
+import * as balanceService from "../stock/inventory.service.js";
+import {
+  DispatchType,
+  StockMovementType,
+  TransferStatus,
+} from "../../shared/constants/roles.js";
+import {
+  buildPaginationMeta,
+  filterBySearch,
+  getPaginationParams,
+  mongoSort,
+  paginateArray,
+  sortRows,
+} from "../../shared/pagination/pagination.js";
+import type {
+  AdjustStockInput,
+  InvoiceListQuery,
+  InvoiceLookupQuery,
+  LowStockQuery,
+  MovementsQuery,
+  StockFilters,
+  StockItemDetailQuery,
+  StockQuery,
+  UpdateMovementInvoiceInput,
+  UpdateLowStockThresholdInput,
+} from "./inventory.validation.js";
+import {
+  buildLowStockTotals,
+  isWarehouseLowStock,
+  resolveLowStockThreshold,
+  type LowStockTotalRow,
+} from "./lowStock.utils.js";
+
+export type { LowStockTotalRow };
+
+export type StockRow = {
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  productId: string;
+  productName: string;
+  secondaryProductName?: string;
+  brandId: string;
+  brandName: string;
+  quantity: number;
+  stockUnit: string;
+  unitsPerStockUnit: number;
+  baseUnit: string;
+  lowStockThreshold?: number;
+  /** Set when threshold comes from the warehouse balance override. */
+  warehouseLowStockThreshold?: number;
+  updatedAt: Date;
+};
+
+async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
+  const filter: Record<string, unknown> = {};
+
+  if (!query.includeZero) {
+    filter.quantity = { $gt: 0 };
+  }
+  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
+    filter.warehouseId = query.warehouseId;
+  }
+
+  const balances = await InventoryBalance.find(filter)
+    .populate<{ warehouseId: { _id: Types.ObjectId; name: string; code: string; isActive?: boolean } }>(
+      "warehouseId",
+      "name code isActive"
+    )
+    .populate<{ productId: { _id: Types.ObjectId; name: string; secondaryName?: string; lowStockThreshold?: number; stockUnit?: string; unitsPerStockUnit?: number; isActive?: boolean; brandId: Types.ObjectId } }>({
+      path: "productId",
+      select: "name secondaryName lowStockThreshold stockUnit unitsPerStockUnit baseUnit isActive brandId",
+      populate: { path: "brandId", select: "name isActive" },
+    })
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  let rows: StockRow[] = [];
+
+  for (const b of balances) {
+    if (!b.productId || typeof b.productId !== "object") continue;
+    if (!b.warehouseId || typeof b.warehouseId !== "object") continue;
+
+    const product = b.productId as unknown as {
+      _id: Types.ObjectId;
+      name: string;
+      secondaryName?: string;
+      lowStockThreshold?: number;
+      stockUnit?: string;
+      unitsPerStockUnit?: number;
+      baseUnit?: string;
+      isActive?: boolean;
+      brandId: { _id: Types.ObjectId; name: string; isActive?: boolean };
+    };
+    const warehouse = b.warehouseId as unknown as {
+      _id: Types.ObjectId;
+      name: string;
+      code: string;
+      isActive?: boolean;
+    };
+    const balanceThreshold = b.lowStockThreshold ?? undefined;
+    const effectiveThreshold = resolveLowStockThreshold(
+      balanceThreshold,
+      product.lowStockThreshold
+    );
+
+    if (product.isActive === false) continue;
+    if (product.brandId?.isActive === false) continue;
+    if (warehouse.isActive === false) continue;
+
+    rows.push({
+      warehouseId: String(warehouse._id),
+      warehouseName: warehouse.name,
+      warehouseCode: warehouse.code,
+      productId: String(product._id),
+      productName: product.name,
+      secondaryProductName: product.secondaryName,
+      brandId: String(product.brandId._id),
+      brandName: product.brandId.name,
+      quantity: b.quantity,
+      stockUnit: product.stockUnit ?? "unit",
+      unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
+      baseUnit: product.baseUnit ?? "piece",
+      lowStockThreshold: effectiveThreshold,
+      warehouseLowStockThreshold: balanceThreshold,
+      updatedAt: b.updatedAt,
+    });
+  }
+
+  if (query.brandId) {
+    rows = rows.filter((r) => r.brandId === query.brandId);
+  }
+  if (query.productId) {
+    rows = rows.filter((r) => r.productId === query.productId);
+  }
+
+  return rows;
+}
+
+
+export type StockLocationLastChange = {
+  type: "STOCK_IN" | "STOCK_OUT";
+  quantity: number;
+  createdAt: Date;
+};
+
+export type StockProductLocation = {
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  quantity: number;
+  lowStockThreshold?: number;
+  warehouseLowStockThreshold?: number;
+  updatedAt: Date;
+  lastChange: StockLocationLastChange | null;
+};
+
+export type StockProductRow = {
+  productId: string;
+  productName: string;
+  secondaryProductName?: string;
+  brandId: string;
+  brandName: string;
+  stockUnit: string;
+  unitsPerStockUnit: number;
+  baseUnit: string;
+  locations: StockProductLocation[];
+  totalQuantity: number;
+  totalLowStockThreshold: number;
+};
+
+function groupStockByProduct(rows: StockRow[]): StockProductRow[] {
+  const map = new Map<string, StockProductRow>();
+  const order: string[] = [];
+
+  for (const r of rows) {
+    if (!map.has(r.productId)) {
+      order.push(r.productId);
+      map.set(r.productId, {
+        productId: r.productId,
+        productName: r.productName,
+        secondaryProductName: r.secondaryProductName,
+        brandId: r.brandId,
+        brandName: r.brandName,
+        stockUnit: r.stockUnit,
+        unitsPerStockUnit: r.unitsPerStockUnit,
+        baseUnit: r.baseUnit,
+        locations: [],
+        totalQuantity: 0,
+        totalLowStockThreshold: 0,
+      });
+    }
+    const entry = map.get(r.productId)!;
+    entry.locations.push({
+      warehouseId: r.warehouseId,
+      warehouseName: r.warehouseName,
+      warehouseCode: r.warehouseCode,
+      quantity: r.quantity,
+      lowStockThreshold: r.lowStockThreshold,
+      warehouseLowStockThreshold: r.warehouseLowStockThreshold,
+      updatedAt: r.updatedAt,
+      lastChange: null,
+    });
+    entry.totalQuantity += r.quantity;
+    if (r.quantity > 0 && r.lowStockThreshold != null) {
+      entry.totalLowStockThreshold += r.lowStockThreshold;
+    }
+  }
+
+  return order.map((id) => map.get(id)!);
+}
+
+async function attachLastChanges(products: StockProductRow[]): Promise<void> {
+  if (products.length === 0) return;
+
+  const productIds = products
+    .map((p) => p.productId)
+    .filter((id) => Types.ObjectId.isValid(id))
+    .map((id) => new Types.ObjectId(id));
+
+  if (productIds.length === 0) return;
+
+  const latest = await StockMovement.aggregate<{
+    _id: { productId: Types.ObjectId; warehouseId: Types.ObjectId };
+    type: "STOCK_IN" | "STOCK_OUT";
+    quantity: number;
+    createdAt: Date;
+  }>([
+    { $match: { productId: { $in: productIds } } },
+    { $sort: { createdAt: -1 } },
+    {
+      $group: {
+        _id: { productId: "$productId", warehouseId: "$warehouseId" },
+        type: { $first: "$type" },
+        quantity: { $first: "$quantity" },
+        createdAt: { $first: "$createdAt" },
+      },
+    },
+  ]);
+
+  const lastChangeByKey = new Map<string, StockLocationLastChange>();
+  for (const entry of latest) {
+    const key = `${String(entry._id.productId)}-${String(entry._id.warehouseId)}`;
+    lastChangeByKey.set(key, {
+      type: entry.type,
+      quantity: entry.quantity,
+      createdAt: entry.createdAt,
+    });
+  }
+
+  for (const product of products) {
+    for (const loc of product.locations) {
+      const key = `${product.productId}-${loc.warehouseId}`;
+      loc.lastChange = lastChangeByKey.get(key) ?? null;
+    }
+  }
+}
+
+const PRODUCT_SORT_FIELDS = {
+  quantity: (p: StockProductRow) => p.totalQuantity,
+  productName: (p: StockProductRow) => p.productName,
+  brandName: (p: StockProductRow) => p.brandName,
+  warehouseName: (p: StockProductRow) =>
+    p.locations
+      .map((l) => l.warehouseName)
+      .sort((a, b) => a.localeCompare(b))[0] ?? "",
+  updatedAt: (p: StockProductRow) =>
+    Math.max(...p.locations.map((l) => l.updatedAt.getTime()), 0),
+} as const;
+
+export async function listCurrentStock(query: StockQuery) {
+  let rows = await fetchStockRows(query);
+  rows = filterBySearch(rows, query.search, [
+    (r) => r.productName,
+    (r) => r.secondaryProductName ?? "",
+    (r) => r.brandName,
+    (r) => r.warehouseName,
+    (r) => r.warehouseCode,
+  ]);
+
+  const warehouses = new Map<
+    string,
+    { warehouseId: string; name: string; code: string; totalUnits: number; skuCount: number }
+  >();
+  const byBrand = new Map<
+    string,
+    { brandId: string; name: string; totalUnits: number; skuCount: number }
+  >();
+  const byProduct = new Map<
+    string,
+    {
+      productId: string;
+      productName: string;
+      brandId: string;
+      brandName: string;
+      stockUnit: string;
+      unitsPerStockUnit: number;
+      baseUnit: string;
+      totalUnits: number;
+    }
+  >();
+
+  let totalUnits = 0;
+
+  for (const r of rows) {
+    totalUnits += r.quantity;
+
+    const wh = warehouses.get(r.warehouseId) ?? {
+      warehouseId: r.warehouseId,
+      name: r.warehouseName,
+      code: r.warehouseCode,
+      totalUnits: 0,
+      skuCount: 0,
+    };
+    wh.totalUnits += r.quantity;
+    wh.skuCount += 1;
+    warehouses.set(r.warehouseId, wh);
+
+    const br = byBrand.get(r.brandId) ?? {
+      brandId: r.brandId,
+      name: r.brandName,
+      totalUnits: 0,
+      skuCount: 0,
+    };
+    br.totalUnits += r.quantity;
+    br.skuCount += 1;
+    byBrand.set(r.brandId, br);
+
+    const key = `${r.productId}-${r.warehouseId}`;
+    byProduct.set(key, {
+      productId: r.productId,
+      productName: r.productName,
+      brandId: r.brandId,
+      brandName: r.brandName,
+      stockUnit: r.stockUnit,
+      unitsPerStockUnit: r.unitsPerStockUnit,
+      baseUnit: r.baseUnit,
+      totalUnits: r.quantity,
+    });
+  }
+
+  let productRows = groupStockByProduct(rows);
+  productRows = sortRows(
+    productRows,
+    query.sortBy ?? "productName",
+    query.sortOrder ?? "asc",
+    PRODUCT_SORT_FIELDS as Record<string, (row: StockProductRow) => string | number>
+  );
+
+  const { items: pagedProducts, pagination } = paginateArray(productRows, query);
+
+  await attachLastChanges(pagedProducts);
+
+  const warehouseList = Array.from(warehouses.values()).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+
+  const flatItems: StockRow[] = pagedProducts.flatMap((p) =>
+    p.locations.map((loc) => ({
+      warehouseId: loc.warehouseId,
+      warehouseName: loc.warehouseName,
+      warehouseCode: loc.warehouseCode,
+      productId: p.productId,
+      productName: p.productName,
+      secondaryProductName: p.secondaryProductName,
+      brandId: p.brandId,
+      brandName: p.brandName,
+      stockUnit: p.stockUnit,
+      unitsPerStockUnit: p.unitsPerStockUnit,
+      baseUnit: p.baseUnit,
+      quantity: loc.quantity,
+      lowStockThreshold: loc.lowStockThreshold,
+      warehouseLowStockThreshold: loc.warehouseLowStockThreshold,
+      updatedAt: loc.updatedAt,
+    }))
+  );
+
+  return {
+    products: pagedProducts,
+    warehouses: warehouseList.map((w) => ({
+      warehouseId: w.warehouseId,
+      name: w.name,
+      code: w.code,
+    })),
+    items: flatItems,
+    summary: {
+      totalUnits,
+      totalSkus: new Set(rows.map((r) => r.productId)).size,
+      byWarehouse: warehouseList,
+      byBrand: Array.from(byBrand.values()).sort((a, b) => a.name.localeCompare(b.name)),
+      byProduct: Array.from(byProduct.values()).sort((a, b) =>
+        a.productName.localeCompare(b.productName)
+      ),
+    },
+    pagination,
+  };
+}
+
+type MovementDoc = {
+  _id: Types.ObjectId;
+  type: string;
+  quantity: number;
+  dispatchType?: string;
+  clientName?: string;
+  invoiceNumber?: string;
+  notes?: string;
+  transferId?: Types.ObjectId;
+  invoiceLastWorkedAt?: Date;
+  createdAt: Date;
+  productId?: unknown;
+  brandId?: unknown;
+  warehouseId?: unknown;
+  destinationWarehouseId?: unknown;
+  createdBy?: unknown;
+};
+
+function mapMovementRow(m: MovementDoc) {
+  const product = m.productId as { _id: Types.ObjectId; name: string; secondaryName?: string };
+  const brand = m.brandId as { _id: Types.ObjectId; name: string };
+  const warehouse = m.warehouseId as {
+    _id: Types.ObjectId;
+    name: string;
+    code: string;
+  };
+  const dest = m.destinationWarehouseId as
+    | { _id: Types.ObjectId; name: string; code: string }
+    | undefined;
+  const createdBy = m.createdBy as { _id: Types.ObjectId; name: string } | undefined;
+
+  return {
+    id: String(m._id),
+    type: m.type as "STOCK_IN" | "STOCK_OUT",
+    quantity: m.quantity,
+    dispatchType: m.dispatchType,
+    clientName: m.clientName,
+    invoiceNumber: m.invoiceNumber,
+    notes: m.notes,
+    invoiceLastWorkedAt: m.invoiceLastWorkedAt?.toISOString(),
+    transferId: m.transferId ? String(m.transferId) : undefined,
+    product: { id: String(product._id), name: product.name, secondaryName: product.secondaryName },
+    brand: { id: String(brand._id), name: brand.name },
+    warehouse: {
+      id: String(warehouse._id),
+      name: warehouse.name,
+      code: warehouse.code,
+    },
+    destinationWarehouse: dest
+      ? { id: String(dest._id), name: dest.name, code: dest.code }
+      : undefined,
+    createdBy: createdBy
+      ? { id: String(createdBy._id), name: createdBy.name }
+      : undefined,
+    createdAt: m.createdAt,
+  };
+}
+
+function describeMovement(m: {
+  type: string;
+  dispatchType?: string;
+  clientName?: string;
+  invoiceNumber?: string;
+  notes?: string;
+  destinationWarehouse?: { code: string; name: string };
+}): string {
+  if (m.type === StockMovementType.STOCK_IN) {
+    if (m.notes?.toLowerCase().includes("transfer")) {
+      return "Transfer received";
+    }
+    if (m.notes?.toLowerCase().includes("adjustment")) {
+      return "Admin adjustment (increase)";
+    }
+    return m.notes?.trim() || "Stock in";
+  }
+
+  if (m.dispatchType === DispatchType.TRANSFER && m.destinationWarehouse) {
+    return `Transfer to ${m.destinationWarehouse.name} (${m.destinationWarehouse.code})`;
+  }
+  if (m.dispatchType === DispatchType.DIRECT_SELLING) {
+    const client = m.clientName?.trim() || "Client";
+    const inv = m.invoiceNumber?.trim();
+    return inv ? `Sale to ${client} · Invoice ${inv}` : `Sale to ${client}`;
+  }
+  if (m.notes?.toLowerCase().includes("adjustment")) {
+    return "Admin adjustment (decrease)";
+  }
+  if (m.notes?.toLowerCase().includes("tally")) {
+    return "Tally import deduction";
+  }
+  return m.notes?.trim() || "Stock out";
+}
+
+function applyRunningBalances(
+  currentQuantity: number,
+  movements: MovementDoc[]
+): Array<
+  ReturnType<typeof mapMovementRow> & {
+    direction: "in" | "out";
+    change: number;
+    balanceAfter: number;
+    description: string;
+  }
+> {
+  let running = currentQuantity;
+
+  return movements.map((m) => {
+    const row = mapMovementRow(m);
+    const balanceAfter = running;
+    const direction = m.type === StockMovementType.STOCK_IN ? ("in" as const) : ("out" as const);
+    const change = m.type === StockMovementType.STOCK_IN ? m.quantity : -m.quantity;
+
+    if (m.type === StockMovementType.STOCK_IN) {
+      running -= m.quantity;
+    } else {
+      running += m.quantity;
+    }
+
+    return {
+      ...row,
+      direction,
+      change,
+      balanceAfter,
+      description: describeMovement({
+        type: m.type,
+        dispatchType: m.dispatchType,
+        clientName: m.clientName,
+        invoiceNumber: m.invoiceNumber,
+        notes: m.notes,
+        destinationWarehouse: row.destinationWarehouse,
+      }),
+    };
+  });
+}
+
+export async function getStockItemDetail(query: StockItemDetailQuery) {
+  if (
+    !Types.ObjectId.isValid(query.warehouseId) ||
+    !Types.ObjectId.isValid(query.productId)
+  ) {
+    throw new BadRequestError("Invalid warehouse or product");
+  }
+
+  const [balance, product] = await Promise.all([
+    InventoryBalance.findOne({
+      warehouseId: query.warehouseId,
+      productId: query.productId,
+    })
+      .populate<{ productId: { _id: Types.ObjectId; name: string; brandId: Types.ObjectId } }>(
+        "productId",
+        "name brandId"
+      )
+      .populate<{ warehouseId: { _id: Types.ObjectId; name: string; code: string } }>(
+        "warehouseId",
+        "name code"
+      )
+      .lean(),
+    Product.findById(query.productId)
+      .populate<{ brandId: { _id: Types.ObjectId; name: string } }>("brandId", "name")
+      .lean(),
+  ]);
+
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+
+  const brand = product.brandId as { _id: Types.ObjectId; name: string };
+  const balanceWarehouse = balance?.warehouseId as
+    | { _id: Types.ObjectId; name: string; code: string }
+    | undefined;
+
+  let whDoc: { name: string; code: string };
+  if (balanceWarehouse) {
+    whDoc = balanceWarehouse;
+  } else {
+    const wh = await Warehouse.findById(query.warehouseId).lean();
+    if (!wh) {
+      throw new NotFoundError("Warehouse not found");
+    }
+    whDoc = { name: wh.name, code: wh.code };
+  }
+  const currentQuantity = balance?.quantity ?? 0;
+
+  const movementFilter: Record<string, unknown> = {
+    warehouseId: query.warehouseId,
+    productId: query.productId,
+  };
+  if (query.type) {
+    movementFilter.type = query.type;
+  }
+
+  const allMovements = (await StockMovement.find(movementFilter)
+    .sort({ createdAt: -1 })
+    .populate("productId", "name secondaryName")
+    .populate("brandId", "name")
+    .populate("warehouseId", "name code")
+    .populate("destinationWarehouseId", "name code")
+    .populate("createdBy", "name")
+    .lean()) as MovementDoc[];
+
+  const totalsByType = await StockMovement.aggregate([
+    { $match: movementFilter },
+    {
+      $group: {
+        _id: "$type",
+        total: { $sum: "$quantity" },
+      },
+    },
+  ]);
+
+  let totalStockIn = 0;
+  let totalStockOut = 0;
+  for (const t of totalsByType) {
+    if (t._id === StockMovementType.STOCK_IN) totalStockIn = t.total;
+    if (t._id === StockMovementType.STOCK_OUT) totalStockOut = t.total;
+  }
+
+  // Running balances must be computed on the chronological (createdAt desc)
+  // order returned by the query; each row's balanceAfter is then fixed, so we
+  // can safely re-order rows for display by the requested sort field.
+  const ledger = applyRunningBalances(currentQuantity, allMovements);
+  const sortedLedger = sortRows(ledger, query.sortBy, query.sortOrder ?? "desc", {
+    createdAt: (r) => new Date(r.createdAt).getTime(),
+    quantity: (r) => r.quantity,
+    type: (r) => r.type,
+  });
+  const { items, pagination } = paginateArray(sortedLedger, query);
+
+  return {
+    item: {
+      warehouseId: query.warehouseId,
+      warehouseName: whDoc.name,
+      warehouseCode: whDoc.code,
+      productId: query.productId,
+      productName: product.name,
+      secondaryProductName: product.secondaryName,
+      brandId: String(brand._id),
+      brandName: brand.name,
+      stockUnit: product.stockUnit ?? "unit",
+      unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
+      baseUnit: product.baseUnit ?? "piece",
+      quantity: currentQuantity,
+      lowStockThreshold: resolveLowStockThreshold(
+        balance?.lowStockThreshold,
+        product.lowStockThreshold
+      ),
+      warehouseLowStockThreshold: balance?.lowStockThreshold ?? undefined,
+      productLowStockThreshold: product.lowStockThreshold,
+      updatedAt: balance?.updatedAt ?? null,
+    },
+    summary: {
+      totalStockIn,
+      totalStockOut,
+      movementCount: allMovements.length,
+    },
+    items,
+    pagination,
+  };
+}
+
+export async function listMovementHistory(query: MovementsQuery) {
+  const filter: Record<string, unknown> = {};
+
+  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
+    filter.warehouseId = query.warehouseId;
+  }
+  if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
+    filter.brandId = query.brandId;
+  }
+  if (query.productId && Types.ObjectId.isValid(query.productId)) {
+    filter.productId = query.productId;
+  }
+  if (query.type) {
+    filter.type = query.type;
+  }
+  if (query.dateFrom || query.dateTo) {
+    filter.createdAt = {};
+    if (query.dateFrom) {
+      (filter.createdAt as Record<string, Date>).$gte = new Date(query.dateFrom);
+    }
+    if (query.dateTo) {
+      const end = new Date(query.dateTo);
+      end.setHours(23, 59, 59, 999);
+      (filter.createdAt as Record<string, Date>).$lte = end;
+    }
+  }
+
+  const search = query.search?.trim();
+  if (search) {
+    const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const [productIds, brandIds, warehouseIds] = await Promise.all([
+      Product.find({ $or: [{ name: regex }, { secondaryName: regex }] }).distinct("_id"),
+      Brand.find({ name: regex }).distinct("_id"),
+      Warehouse.find({ $or: [{ name: regex }, { code: regex }] }).distinct("_id"),
+    ]);
+    filter.$or = [
+      { productId: { $in: productIds } },
+      { brandId: { $in: brandIds } },
+      { warehouseId: { $in: warehouseIds } },
+      { destinationWarehouseId: { $in: warehouseIds } },
+      { invoiceNumber: regex },
+      { clientName: regex },
+    ];
+  }
+
+  const { page, limit, skip, sortOrder } = getPaginationParams(query);
+  const sortField = mongoSort(query.sortBy ?? "createdAt", sortOrder);
+
+  const [total, movements] = await Promise.all([
+    StockMovement.countDocuments(filter),
+    StockMovement.find(filter)
+      .sort(sortField)
+      .skip(skip)
+      .limit(limit)
+      .populate("productId", "name secondaryName")
+      .populate("brandId", "name")
+      .populate("warehouseId", "name code")
+      .populate("destinationWarehouseId", "name code")
+      .lean(),
+  ]);
+
+  const items = (movements as MovementDoc[]).map((m) => mapMovementRow(m));
+
+  return {
+    items,
+    pagination: buildPaginationMeta(total, page, limit),
+  };
+}
+
+export async function listLowStock(query: LowStockQuery) {
+  const sharedFilters = {
+    brandId: query.brandId,
+    includeZero: false as const,
+  };
+
+  const [warehouseScopedRows, allWarehouseRows] = await Promise.all([
+    fetchStockRows({
+      ...sharedFilters,
+      warehouseId: query.warehouseId,
+    }),
+    fetchStockRows(sharedFilters),
+  ]);
+
+  const lowItems = warehouseScopedRows.filter(isWarehouseLowStock);
+
+  const filteredWarehouseItems = lowItems.filter(
+    (r) =>
+      !query.search?.trim() ||
+      [r.productName, r.secondaryProductName ?? "", r.brandName, r.warehouseName, r.warehouseCode].some(
+        (s) => s.toLowerCase().includes(query.search!.trim().toLowerCase())
+      )
+  );
+
+  const sortedWarehouseItems = sortRows(
+    filteredWarehouseItems,
+    query.sortBy ?? "quantity",
+    query.sortOrder ?? "asc",
+    {
+      quantity: (r) => r.quantity,
+      productName: (r) => r.productName,
+      brandName: (r) => r.brandName,
+      warehouseName: (r) => r.warehouseName,
+      lowStockThreshold: (r) => r.lowStockThreshold ?? 0,
+    }
+  );
+
+  const totalRows = buildLowStockTotals(allWarehouseRows).filter(
+    (r) =>
+      !query.search?.trim() ||
+      [r.productName, r.secondaryProductName ?? "", r.brandName].some((s) =>
+        s.toLowerCase().includes(query.search!.trim().toLowerCase())
+      )
+  );
+
+  const sortedTotalRows = sortRows(
+    totalRows,
+    query.sortBy === "warehouseName" ? "totalQuantity" : (query.sortBy ?? "totalQuantity"),
+    query.sortOrder ?? "asc",
+    {
+      totalQuantity: (r) => r.totalQuantity,
+      quantity: (r) => r.totalQuantity,
+      productName: (r) => r.productName,
+      brandName: (r) => r.brandName,
+      lowStockThreshold: (r) => r.totalLowStockThreshold,
+    }
+  );
+
+  const { items, pagination } = paginateArray(sortedWarehouseItems, query);
+
+  return {
+    count: filteredWarehouseItems.length,
+    items,
+    pagination,
+    totalCount: sortedTotalRows.length,
+    totals: sortedTotalRows,
+  };
+}
+
+export async function getAdminDashboard() {
+  const allRows = await fetchStockRows({ includeZero: false });
+  const stockSummary = buildStockSummary(allRows);
+
+  const [recentMovements, pendingTransfers, warehouses, recentSales] =
+    await Promise.all([
+      listMovementHistory({
+        page: 1,
+        limit: 10,
+        sortBy: "createdAt",
+        sortOrder: "desc",
+      }),
+      Transfer.countDocuments({ status: TransferStatus.PENDING }),
+      Warehouse.find({ isActive: true }).select("name code").lean(),
+      StockMovement.find({
+        type: StockMovementType.STOCK_OUT,
+        dispatchType: DispatchType.DIRECT_SELLING,
+      })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .populate("productId", "name secondaryName")
+        .populate("brandId", "name")
+        .populate("warehouseId", "name code")
+        .lean(),
+    ]);
+
+  const lowStock = await listLowStock({
+    page: 1,
+    limit: 10,
+    sortBy: "quantity",
+    sortOrder: "asc",
+  });
+
+  const recentTransfers = await Transfer.find()
+    .sort({ createdAt: -1 })
+    .limit(15)
+    .populate("productId", "name secondaryName")
+    .populate("brandId", "name")
+    .populate("sourceWarehouseId", "name code")
+    .populate("destinationWarehouseId", "name code")
+    .populate("createdBy", "name")
+    .populate("receivedBy", "name")
+    .populate("returnedBy", "name")
+    .lean();
+
+  const transferActivity = recentTransfers.map((t) => {
+    const product = t.productId as unknown as { name: string };
+    const brand = t.brandId as unknown as { name: string };
+    const source = t.sourceWarehouseId as unknown as { name: string; code: string };
+    const dest = t.destinationWarehouseId as unknown as { name: string; code: string };
+    const createdBy = t.createdBy as unknown as { name: string } | null;
+    const receivedBy = t.receivedBy as unknown as { name: string } | null;
+    const returnedBy = t.returnedBy as unknown as { name: string } | null;
+    return {
+      id: String(t._id),
+      date: t.createdAt.toISOString().slice(0, 10),
+      status: t.status,
+      quantity: t.quantity,
+      product: product.name,
+      brand: brand.name,
+      sourceWarehouse: source.code,
+      destinationWarehouse: dest.code,
+      initiatedBy: createdBy?.name,
+      receivedBy: receivedBy?.name,
+      returnedBy: returnedBy?.name,
+      createdAt: t.createdAt,
+      receivedAt: t.receivedAt,
+      returnedAt: t.returnedAt,
+    };
+  });
+
+  const sales = recentSales.map((m) => {
+    const product = m.productId as unknown as { _id: Types.ObjectId; name: string };
+    const brand = m.brandId as unknown as { _id: Types.ObjectId; name: string };
+    const warehouse = m.warehouseId as unknown as {
+      _id: Types.ObjectId;
+      name: string;
+      code: string;
+    };
+    return {
+      id: String(m._id),
+      quantity: m.quantity,
+      clientName: m.clientName,
+      invoiceNumber: m.invoiceNumber,
+      product: product.name,
+      brand: brand.name,
+      warehouse: warehouse.name,
+      createdAt: m.createdAt,
+    };
+  });
+
+  return {
+    totalInventoryUnits: stockSummary.totalUnits,
+    totalSkus: stockSummary.totalSkus,
+    warehouseCount: warehouses.length,
+    pendingTransfers,
+    lowStockCount: lowStock.count,
+    lowStockItems: lowStock.items.map((row) => ({
+      warehouseId: row.warehouseId,
+      warehouseName: row.warehouseName,
+      warehouseCode: row.warehouseCode,
+      productId: row.productId,
+      productName: row.productName,
+      secondaryProductName: row.secondaryProductName,
+      brandId: row.brandId,
+      brandName: row.brandName,
+      quantity: row.quantity,
+      lowStockThreshold: row.lowStockThreshold,
+      stockUnit: row.stockUnit,
+      unitsPerStockUnit: row.unitsPerStockUnit,
+      baseUnit: row.baseUnit,
+    })),
+    lowStockTotalCount: lowStock.totalCount,
+    lowStockTotals: lowStock.totals.map((row) => ({
+      productId: row.productId,
+      productName: row.productName,
+      secondaryProductName: row.secondaryProductName,
+      brandId: row.brandId,
+      brandName: row.brandName,
+      totalQuantity: row.totalQuantity,
+      totalLowStockThreshold: row.totalLowStockThreshold,
+      stockUnit: row.stockUnit,
+      unitsPerStockUnit: row.unitsPerStockUnit,
+      baseUnit: row.baseUnit,
+    })),
+    transferActivity,
+    warehouseSummaries: stockSummary.byWarehouse,
+    recentMovements: recentMovements.items,
+    recentSales: sales,
+  };
+}
+
+function buildStockSummary(rows: StockRow[]) {
+  const byWarehouse = new Map<
+    string,
+    { warehouseId: string; name: string; code: string; totalUnits: number; skuCount: number }
+  >();
+  const uniqueProducts = new Set<string>();
+  let totalUnits = 0;
+
+  for (const r of rows) {
+    totalUnits += r.quantity;
+    uniqueProducts.add(r.productId);
+    const wh = byWarehouse.get(r.warehouseId) ?? {
+      warehouseId: r.warehouseId,
+      name: r.warehouseName,
+      code: r.warehouseCode,
+      totalUnits: 0,
+      skuCount: 0,
+    };
+    wh.totalUnits += r.quantity;
+    wh.skuCount += 1;
+    byWarehouse.set(r.warehouseId, wh);
+  }
+
+  return {
+    totalUnits,
+    totalSkus: uniqueProducts.size,
+    byWarehouse: Array.from(byWarehouse.values()).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    ),
+  };
+}
+
+export async function adjustStockBalance(input: AdjustStockInput, user: AuthUser) {
+  if (!Types.ObjectId.isValid(input.warehouseId)) {
+    throw new BadRequestError("Invalid warehouse");
+  }
+
+  const warehouse = await Warehouse.findOne({
+    _id: input.warehouseId,
+    isActive: true,
+  });
+  if (!warehouse) {
+    throw new NotFoundError("Warehouse not found");
+  }
+
+  const {
+    productId,
+    brandId,
+    name: productName,
+  } = await balanceService.validateProductForBrand(input.productId, input.brandId);
+
+  return runInTransaction(async (session) => {
+    const { previous, next, delta } = await balanceService.setBalance(
+      input.warehouseId,
+      String(productId),
+      input.quantity,
+      session
+    );
+
+    if (delta !== 0) {
+      const movementType =
+        delta > 0 ? StockMovementType.STOCK_IN : StockMovementType.STOCK_OUT;
+
+      const [movement] = await StockMovement.create(
+        [
+          {
+            type: movementType,
+            warehouseId: input.warehouseId,
+            productId,
+            brandId,
+            quantity: Math.abs(delta),
+            notes: input.reason
+              ? `Admin adjustment: ${input.reason}`
+              : "Admin adjustment",
+            createdBy: user.id,
+          },
+        ],
+        dbSession(session)
+      );
+
+      await AuditLog.create(
+        [
+          {
+            action: "STOCK_ADJUSTED",
+            entity: "StockMovement",
+            entityId: movement._id,
+            userId: user.id,
+            metadata: {
+              warehouseId: input.warehouseId,
+              warehouseName: warehouse.name,
+              warehouseCode: warehouse.code,
+              productId: String(productId),
+              productName,
+              previous,
+              next,
+              ...(input.reason ? { reason: input.reason } : {}),
+            },
+          },
+        ],
+        dbSession(session)
+      );
+    }
+
+    return {
+      warehouseId: input.warehouseId,
+      productId: String(productId),
+      brandId: String(brandId),
+      previousQuantity: previous,
+      quantity: next,
+      changed: delta !== 0,
+    };
+  });
+}
+
+export async function updateLowStockThreshold(
+  input: UpdateLowStockThresholdInput,
+  user: AuthUser
+) {
+  if (
+    !Types.ObjectId.isValid(input.warehouseId) ||
+    !Types.ObjectId.isValid(input.productId)
+  ) {
+    throw new BadRequestError("Invalid warehouse or product");
+  }
+
+  const [warehouse, product, balance] = await Promise.all([
+    Warehouse.findOne({ _id: input.warehouseId, isActive: true }).lean(),
+    Product.findById(input.productId).lean(),
+    InventoryBalance.findOne({
+      warehouseId: input.warehouseId,
+      productId: input.productId,
+    }),
+  ]);
+
+  if (!warehouse) {
+    throw new NotFoundError("Warehouse not found");
+  }
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+  if (!balance) {
+    throw new NotFoundError("No stock record for this product at this warehouse");
+  }
+
+  if (input.lowStockThreshold === null) {
+    balance.lowStockThreshold = undefined;
+  } else {
+    balance.lowStockThreshold = input.lowStockThreshold;
+  }
+  await balance.save();
+
+  const effectiveThreshold = resolveLowStockThreshold(
+    balance.lowStockThreshold,
+    product.lowStockThreshold
+  );
+
+  await AuditLog.create({
+    action: "LOW_STOCK_THRESHOLD_UPDATED",
+    entity: "InventoryBalance",
+    entityId: balance._id,
+    userId: user.id,
+    metadata: {
+      warehouseId: input.warehouseId,
+      warehouseName: warehouse.name,
+      warehouseCode: warehouse.code,
+      productId: input.productId,
+      productName: product.name,
+      lowStockThreshold: input.lowStockThreshold,
+      effectiveThreshold,
+    },
+  });
+
+  return {
+    warehouseId: input.warehouseId,
+    productId: input.productId,
+    warehouseLowStockThreshold: balance.lowStockThreshold ?? null,
+    productLowStockThreshold: product.lowStockThreshold ?? null,
+    lowStockThreshold: effectiveThreshold ?? null,
+  };
+}
+
+export async function listInvoiceMovements(query: InvoiceListQuery) {
+  const filter: Record<string, unknown> = {
+    $or: [
+      { dispatchType: DispatchType.DIRECT_SELLING },
+      { invoiceNumber: { $exists: true, $nin: [null, ""] } },
+      { clientName: { $exists: true, $nin: [null, ""] } },
+    ],
+  };
+
+  const term = query.search?.trim();
+  if (term) {
+    const regex = { $regex: term, $options: "i" };
+    const productIds = await Product.find({
+      $or: [{ name: regex }, { secondaryName: regex }],
+    }).distinct("_id");
+    const searchClauses: Record<string, unknown>[] = [
+      { invoiceNumber: regex },
+      { clientName: regex },
+    ];
+    if (productIds.length > 0) {
+      searchClauses.push({ productId: { $in: productIds } });
+    }
+    filter.$and = [{ $or: filter.$or }, { $or: searchClauses }];
+    delete filter.$or;
+  }
+
+  const sortBy = query.sortBy ?? "createdAt";
+  const { page, limit, skip, sortOrder } = getPaginationParams(query);
+  const sortField = mongoSort(sortBy, sortOrder);
+
+  const [total, movements] = await Promise.all([
+    StockMovement.countDocuments(filter),
+    StockMovement.find(filter)
+      .sort(sortField)
+      .skip(skip)
+      .limit(limit)
+      .populate("productId", "name secondaryName")
+      .populate("brandId", "name")
+      .populate("warehouseId", "name code")
+      .populate("destinationWarehouseId", "name code")
+      .lean(),
+  ]);
+
+  return {
+    items: (movements as MovementDoc[]).map((m) => mapMovementRow(m)),
+    pagination: buildPaginationMeta(total, page, limit),
+  };
+}
+
+export async function searchMovementsForInvoiceFix(query: InvoiceLookupQuery) {
+  if (!query.search?.trim()) {
+    return listInvoiceMovements(query);
+  }
+  return listInvoiceMovements(query);
+}
+
+export async function updateMovementInvoice(
+  movementId: string,
+  input: UpdateMovementInvoiceInput,
+  user: AuthUser
+) {
+  if (!Types.ObjectId.isValid(movementId)) {
+    throw new BadRequestError("Invalid movement id");
+  }
+
+  const applyUpdate = async (session: ClientSession | null = null) => {
+    const movement = await StockMovement.findById(movementId).session(session ?? null);
+    if (!movement) {
+      throw new NotFoundError("Stock movement not found");
+    }
+
+    const previousInvoice = movement.invoiceNumber?.trim() || "";
+    const previousClient = movement.clientName?.trim() || "";
+    const previousQuantity = movement.quantity;
+    const nextInvoice =
+      input.invoiceNumber !== undefined ? input.invoiceNumber.trim() : previousInvoice;
+    const nextClient =
+      input.clientName !== undefined ? input.clientName.trim() : previousClient;
+    const nextQuantity =
+      input.quantity !== undefined ? input.quantity : previousQuantity;
+
+    const invoiceChanged = nextInvoice !== previousInvoice;
+    const clientChanged = nextClient !== previousClient;
+    const quantityChanged = nextQuantity !== previousQuantity;
+    const togglingWorked = input.markLastWorked !== undefined;
+    const markingWorked = input.markLastWorked === true;
+    const unmarkingWorked = input.markLastWorked === false;
+
+    if (!invoiceChanged && !clientChanged && !quantityChanged && !togglingWorked) {
+      const unchanged = await StockMovement.findById(movementId)
+        .populate("productId", "name secondaryName")
+        .populate("brandId", "name")
+        .populate("warehouseId", "name code")
+        .populate("destinationWarehouseId", "name code")
+        .session(session ?? null)
+        .lean();
+      return mapMovementRow(unchanged as MovementDoc);
+    }
+
+    if (quantityChanged) {
+      if (
+        movement.type !== StockMovementType.STOCK_OUT ||
+        movement.dispatchType !== DispatchType.DIRECT_SELLING
+      ) {
+        throw new BadRequestError("Quantity can only be updated on client sale invoices");
+      }
+      const delta = previousQuantity - nextQuantity;
+      if (delta < 0) {
+        await balanceService.assertSufficientStock(
+          String(movement.warehouseId),
+          String(movement.productId),
+          Math.abs(delta),
+          session
+        );
+      }
+      if (delta !== 0) {
+        await balanceService.adjustBalance(
+          String(movement.warehouseId),
+          String(movement.productId),
+          delta,
+          session
+        );
+      }
+      movement.quantity = nextQuantity;
+    }
+
+    if (invoiceChanged) {
+      movement.invoiceNumber = nextInvoice || undefined;
+    }
+    if (clientChanged) {
+      movement.clientName = nextClient || undefined;
+    }
+    if (markingWorked) {
+      await StockMovement.updateMany(
+        { invoiceLastWorkedAt: { $exists: true } },
+        { $unset: { invoiceLastWorkedAt: 1 } }
+      ).session(session ?? null);
+      movement.invoiceLastWorkedAt = new Date();
+    } else if (unmarkingWorked) {
+      movement.invoiceLastWorkedAt = undefined;
+    }
+
+    await movement.save({ session });
+
+    const refreshed = await StockMovement.findById(movementId)
+      .populate("productId", "name secondaryName")
+      .populate("brandId", "name")
+      .populate("warehouseId", "name code")
+      .populate("destinationWarehouseId", "name code")
+      .session(session ?? null)
+      .lean();
+
+    const row = mapMovementRow(refreshed as MovementDoc);
+
+    if (invoiceChanged || clientChanged || quantityChanged) {
+      await AuditLog.create(
+        [
+          {
+            action: "INVOICE_UPDATED",
+            entity: "StockMovement",
+            entityId: movement._id,
+            userId: user.id,
+            metadata: {
+              movementId: String(movement._id),
+              movementType: movement.type,
+              productId: row.product?.id,
+              productName: row.product?.name,
+              brandId: row.brand?.id,
+              brandName: row.brand?.name,
+              warehouseId: row.warehouse?.id,
+              warehouseName: row.warehouse?.name,
+              warehouseCode: row.warehouse?.code,
+              previousClientName: previousClient || undefined,
+              clientName: nextClient || undefined,
+              previousInvoiceNumber: previousInvoice || undefined,
+              invoiceNumber: nextInvoice || undefined,
+              previousQuantity: quantityChanged ? previousQuantity : undefined,
+              quantity: quantityChanged ? nextQuantity : undefined,
+            },
+          },
+        ],
+        { session }
+      );
+    }
+
+    return row;
+  };
+
+  if (input.quantity !== undefined) {
+    return runInTransaction(applyUpdate);
+  }
+
+  return applyUpdate(null);
+}
+
+export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
+  if (!Types.ObjectId.isValid(movementId)) {
+    throw new BadRequestError("Invalid movement id");
+  }
+
+  return runInTransaction(async (session) => {
+    const movement = await StockMovement.findById(movementId).session(session ?? null);
+    if (!movement) {
+      throw new NotFoundError("Stock movement not found");
+    }
+
+    if (
+      movement.type !== StockMovementType.STOCK_OUT ||
+      movement.dispatchType !== DispatchType.DIRECT_SELLING
+    ) {
+      throw new BadRequestError("Only client sale invoices can be deleted");
+    }
+
+    await balanceService.adjustBalance(
+      String(movement.warehouseId),
+      String(movement.productId),
+      movement.quantity,
+      session
+    );
+
+    const product = await Product.findById(movement.productId).lean();
+    const warehouse = await Warehouse.findById(movement.warehouseId).lean();
+
+    await AuditLog.create(
+      [
+        {
+          action: "INVOICE_DELETED",
+          entity: "StockMovement",
+          entityId: movement._id,
+          userId: user.id,
+          metadata: {
+            movementId: String(movement._id),
+            invoiceNumber: movement.invoiceNumber,
+            clientName: movement.clientName,
+            quantity: movement.quantity,
+            productName: product?.name,
+            warehouseName: warehouse?.name,
+          },
+        },
+      ],
+      dbSession(session)
+    );
+
+    await StockMovement.findByIdAndDelete(movementId).session(session ?? null);
+
+    return { deleted: true, id: movementId };
+  });
+}
