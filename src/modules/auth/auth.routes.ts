@@ -22,6 +22,14 @@ function readRefreshToken(req: {
   return req.cookies?.[REFRESH_TOKEN_COOKIE] ?? req.body?.refreshToken;
 }
 
+/** Prefer body token — client storage updates on rotation; httpOnly cookie can lag behind the proxy. */
+function readRefreshTokenForRefresh(req: {
+  cookies?: Record<string, string>;
+  body?: { refreshToken?: string };
+}): string | undefined {
+  return req.body?.refreshToken ?? req.cookies?.[REFRESH_TOKEN_COOKIE];
+}
+
 function sendAuthTokens(
   res: Parameters<typeof setAccessTokenCookie>[0],
   result: {
@@ -74,7 +82,7 @@ router.post(
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
     }
 
-    const refreshToken = readRefreshToken(req);
+    const refreshToken = readRefreshTokenForRefresh(req);
     if (!refreshToken) {
       throw new BadRequestError("Refresh token is required");
     }
