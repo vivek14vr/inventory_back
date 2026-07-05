@@ -61,6 +61,8 @@ export type StockRow = {
   lowStockThreshold?: number;
   /** Set when threshold comes from the warehouse balance override. */
   warehouseLowStockThreshold?: number;
+  /** Product-wide fallback threshold (base units). */
+  productLowStockThreshold?: number;
   updatedAt: Date;
 };
 
@@ -68,7 +70,10 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
   const filter: Record<string, unknown> = {};
 
   if (!query.includeZero) {
-    filter.quantity = { $gt: 0 };
+    filter.$or = [
+      { quantity: { $gt: 0 } },
+      { lowStockThreshold: { $exists: true, $ne: null } },
+    ];
   }
   if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
     filter.warehouseId = query.warehouseId;
@@ -135,6 +140,7 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
       baseUnit: product.baseUnit ?? "piece",
       lowStockThreshold: effectiveThreshold,
       warehouseLowStockThreshold: balanceThreshold,
+      productLowStockThreshold: product.lowStockThreshold,
       updatedAt: b.updatedAt,
     });
   }
@@ -179,6 +185,7 @@ export type StockProductRow = {
   locations: StockProductLocation[];
   totalQuantity: number;
   totalLowStockThreshold: number;
+  productLowStockThreshold?: number;
 };
 
 function groupStockByProduct(rows: StockRow[]): StockProductRow[] {
@@ -200,6 +207,7 @@ function groupStockByProduct(rows: StockRow[]): StockProductRow[] {
         locations: [],
         totalQuantity: 0,
         totalLowStockThreshold: 0,
+        productLowStockThreshold: r.productLowStockThreshold,
       });
     }
     const entry = map.get(r.productId)!;
@@ -383,6 +391,7 @@ export async function listCurrentStock(query: StockQuery) {
       quantity: loc.quantity,
       lowStockThreshold: loc.lowStockThreshold,
       warehouseLowStockThreshold: loc.warehouseLowStockThreshold,
+      productLowStockThreshold: p.productLowStockThreshold,
       updatedAt: loc.updatedAt,
     }))
   );
@@ -914,6 +923,7 @@ export async function getAdminDashboard() {
       brandName: row.brandName,
       quantity: row.quantity,
       lowStockThreshold: row.lowStockThreshold,
+      warehouseLowStockThreshold: row.warehouseLowStockThreshold,
       stockUnit: row.stockUnit,
       unitsPerStockUnit: row.unitsPerStockUnit,
       baseUnit: row.baseUnit,
