@@ -8,7 +8,11 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as importsService from "./imports.service.js";
 import * as productImportService from "./productImport.service.js";
-import { productImportConfirmSchema } from "./imports.validation.js";
+import * as salesImportService from "./salesImport.service.js";
+import {
+  productImportConfirmSchema,
+  salesImportConfirmSchema,
+} from "./imports.validation.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -71,6 +75,28 @@ router.post(
   asyncHandler(async (req, res) => {
     const input = productImportConfirmSchema.parse(req.body);
     const result = await productImportService.confirmProductImport(input, req.user!);
+    sendSuccess(res, result, 201);
+  })
+);
+
+router.post(
+  "/sales/preview",
+  upload.single("file"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      throw new BadRequestError("Excel file is required");
+    }
+
+    const preview = await salesImportService.previewSalesImport(req.file.buffer);
+    sendSuccess(res, preview);
+  })
+);
+
+router.post(
+  "/sales/confirm",
+  asyncHandler(async (req, res) => {
+    const input = salesImportConfirmSchema.parse(req.body);
+    const result = await salesImportService.confirmSalesImport(input, req.user!);
     sendSuccess(res, result, 201);
   })
 );

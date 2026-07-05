@@ -95,3 +95,34 @@ export function findProductByBrandLabelOverlap<T extends ProductWithNames>(
 
   return matches[0];
 }
+
+/**
+ * Match a sales-register label against any product primary/secondary name
+ * (any brand). Throws when more than one product shares the label.
+ */
+export function findProductByLabelOverlap<T extends ProductWithNames>(
+  products: T[],
+  label: string
+): T | undefined {
+  const importLabel = normalizeProductName(label.trim());
+  if (!importLabel) return undefined;
+
+  const matches: T[] = [];
+  for (const product of products) {
+    const existingLabels = [product.name, product.secondaryName]
+      .map((name) => name?.trim())
+      .filter((name): name is string => Boolean(name))
+      .map((name) => normalizeProductName(name));
+    if (existingLabels.includes(importLabel)) {
+      matches.push(product);
+    }
+  }
+
+  if (matches.length > 1) {
+    throw new BadRequestError(
+      `"${label.trim()}" matches multiple existing products. Pick the target product explicitly.`
+    );
+  }
+
+  return matches[0];
+}

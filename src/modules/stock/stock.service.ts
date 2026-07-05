@@ -699,13 +699,15 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
   const notes = input.notes?.trim() || undefined;
 
   const txnResult = await runInTransaction(async (session) => {
-    for (const line of validatedLines) {
-      await inventoryService.assertSufficientStock(
-        warehouseId,
-        String(line.productId),
-        line.quantity,
-        session
-      );
+    if (!input.allowInsufficientStock) {
+      for (const line of validatedLines) {
+        await inventoryService.assertSufficientStock(
+          warehouseId,
+          String(line.productId),
+          line.quantity,
+          session
+        );
+      }
     }
 
     const movementIds: Types.ObjectId[] = [];
