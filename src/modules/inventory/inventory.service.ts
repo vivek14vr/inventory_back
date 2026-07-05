@@ -38,10 +38,15 @@ import type {
 } from "./inventory.validation.js";
 import {
   buildLowStockTotals,
+  extractWarehouseColumns,
+  groupLowStockByProduct,
   isWarehouseLowStock,
   resolveLowStockThreshold,
   type LowStockTotalRow,
 } from "./lowStock.utils.js";
+import {
+  defaultLowStockThresholdBase,
+} from "../../shared/constants/lowStockDefaults.js";
 
 export type { LowStockTotalRow };
 
@@ -69,85 +74,92 @@ export type StockRow = {
 };
 
 async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
-  const filter: Record<string, unknown> = {};
+  const includeZero = query.includeZero !== false;
 
+  const productFilter: Record<string, unknown> = { isActive: true };
+  if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
+    productFilter.brandId = query.brandId;
+  }
+  if (query.productId && Types.ObjectId.isValid(query.productId)) {
+    productFilter._id = query.productId;
+  }
+
+  const warehouseFilter: Record<string, unknown> = { isActive: true };
   if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
-    filter.warehouseId = query.warehouseId;
+    warehouseFilter._id = query.warehouseId;
   }
 
-  const balances = await InventoryBalance.find(filter)
-    .populate<{ warehouseId: { _id: Types.ObjectId; name: string; code: string; isActive?: boolean } }>(
-      "warehouseId",
-      "name code isActive"
-    )
-    .populate<{ productId: { _id: Types.ObjectId; name: string; secondaryName?: string; lowStockThreshold?: number; stockUnit?: string; unitsPerStockUnit?: number; isActive?: boolean; brandId: Types.ObjectId } }>({
-      path: "productId",
-      select: "name secondaryName lowStockThreshold totalLowStockThreshold stockUnit unitsPerStockUnit baseUnit isActive brandId",
-      populate: { path: "brandId", select: "name isActive" },
-    })
-    .sort({ updatedAt: -1 })
-    .lean();
+  const [products, warehouses, balances] = await Promise.all([
+    Product.find(productFilter)
+      .populate<{ brandId: { _id: Types.ObjectId; name: string; isActive?: boolean } }>(
+        "brandId",
+        "name isActive"
+      )
+      .lean(),
+    Warehouse.find(warehouseFilter).select("name code isActive").lean(),
+    InventoryBalance.find({
+      ...(query.warehouseId && Types.ObjectId.isValid(query.warehouseId)
+        ? { warehouseId: query.warehouseId }
+        : {}),
+      ...(query.productId && Types.ObjectId.isValid(query.productId)
+        ? { productId: query.productId }
+        : {}),
+    }).lean(),
+  ]);
 
-  let rows: StockRow[] = [];
-
-  for (const b of balances) {
-    if (!b.productId || typeof b.productId !== "object") continue;
-    if (!b.warehouseId || typeof b.warehouseId !== "object") continue;
-
-    const product = b.productId as unknown as {
-      _id: Types.ObjectId;
-      name: string;
-      secondaryName?: string;
-      lowStockThreshold?: number;
-      totalLowStockThreshold?: number;
-      stockUnit?: string;
-      unitsPerStockUnit?: number;
-      baseUnit?: string;
-      isActive?: boolean;
-      brandId: { _id: Types.ObjectId; name: string; isActive?: boolean };
-    };
-    const warehouse = b.warehouseId as unknown as {
-      _id: Types.ObjectId;
-      name: string;
-      code: string;
-      isActive?: boolean;
-    };
-    const balanceThreshold = b.lowStockThreshold ?? undefined;
-    const effectiveThreshold = resolveLowStockThreshold(
-      balanceThreshold,
-      product.lowStockThreshold
+  const balanceByKey = new Map<string, (typeof balances)[number]>();
+  for (const balance of balances) {
+    balanceByKey.set(
+      `${String(balance.warehouseId)}-${String(balance.productId)}`,
+      balance
     );
-
-    if (product.isActive === false) continue;
-    if (product.brandId?.isActive === false) continue;
-    if (warehouse.isActive === false) continue;
-
-    rows.push({
-      warehouseId: String(warehouse._id),
-      warehouseName: warehouse.name,
-      warehouseCode: warehouse.code,
-      productId: String(product._id),
-      productName: product.name,
-      secondaryProductName: product.secondaryName,
-      brandId: String(product.brandId._id),
-      brandName: product.brandId.name,
-      quantity: b.quantity,
-      stockUnit: product.stockUnit ?? "unit",
-      unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
-      baseUnit: product.baseUnit ?? "piece",
-      lowStockThreshold: effectiveThreshold,
-      warehouseLowStockThreshold: balanceThreshold,
-      productLowStockThreshold: product.lowStockThreshold,
-      productTotalLowStockThreshold: product.totalLowStockThreshold,
-      updatedAt: b.updatedAt,
-    });
   }
 
-  if (query.brandId) {
-    rows = rows.filter((r) => r.brandId === query.brandId);
-  }
-  if (query.productId) {
-    rows = rows.filter((r) => r.productId === query.productId);
+  const rows: StockRow[] = [];
+
+  for (const product of products) {
+    const brand = product.brandId as {
+      _id: Types.ObjectId;
+      name: string;
+      isActive?: boolean;
+    };
+    if (!brand || brand.isActive === false) continue;
+
+    for (const warehouse of warehouses) {
+      if (warehouse.isActive === false) continue;
+
+      const key = `${String(warehouse._id)}-${String(product._id)}`;
+      const balance = balanceByKey.get(key);
+      const quantity = balance?.quantity ?? 0;
+
+      if (!includeZero && quantity === 0) continue;
+
+      const balanceThreshold = balance?.lowStockThreshold ?? undefined;
+      const effectiveThreshold = resolveLowStockThreshold(
+        balanceThreshold,
+        product.lowStockThreshold
+      );
+
+      rows.push({
+        warehouseId: String(warehouse._id),
+        warehouseName: warehouse.name,
+        warehouseCode: warehouse.code,
+        productId: String(product._id),
+        productName: product.name,
+        secondaryProductName: product.secondaryName,
+        brandId: String(brand._id),
+        brandName: brand.name,
+        quantity,
+        stockUnit: product.stockUnit ?? "unit",
+        unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
+        baseUnit: product.baseUnit ?? "piece",
+        lowStockThreshold: effectiveThreshold,
+        warehouseLowStockThreshold: balanceThreshold,
+        productLowStockThreshold: product.lowStockThreshold,
+        productTotalLowStockThreshold: product.totalLowStockThreshold,
+        updatedAt: balance?.updatedAt ?? product.updatedAt,
+      });
+    }
   }
 
   return rows;
@@ -333,7 +345,9 @@ export async function listCurrentStock(query: StockQuery) {
       skuCount: 0,
     };
     wh.totalUnits += r.quantity;
-    wh.skuCount += 1;
+    if (r.quantity > 0) {
+      wh.skuCount += 1;
+    }
     warehouses.set(r.warehouseId, wh);
 
     const br = byBrand.get(r.brandId) ?? {
@@ -343,7 +357,9 @@ export async function listCurrentStock(query: StockQuery) {
       skuCount: 0,
     };
     br.totalUnits += r.quantity;
-    br.skuCount += 1;
+    if (r.quantity > 0) {
+      br.skuCount += 1;
+    }
     byBrand.set(r.brandId, br);
 
     const key = `${r.productId}-${r.warehouseId}`;
@@ -407,7 +423,7 @@ export async function listCurrentStock(query: StockQuery) {
     items: flatItems,
     summary: {
       totalUnits,
-      totalSkus: new Set(rows.map((r) => r.productId)).size,
+      totalSkus: new Set(rows.filter((r) => r.quantity > 0).map((r) => r.productId)).size,
       byWarehouse: warehouseList,
       byBrand: Array.from(byBrand.values()).sort((a, b) => a.name.localeCompare(b.name)),
       byProduct: Array.from(byProduct.values()).sort((a, b) =>
@@ -437,7 +453,14 @@ type MovementDoc = {
 };
 
 function mapMovementRow(m: MovementDoc) {
-  const product = m.productId as { _id: Types.ObjectId; name: string; secondaryName?: string };
+  const product = m.productId as {
+    _id: Types.ObjectId;
+    name: string;
+    secondaryName?: string;
+    stockUnit?: string;
+    unitsPerStockUnit?: number;
+    baseUnit?: string;
+  };
   const brand = m.brandId as { _id: Types.ObjectId; name: string };
   const warehouse = m.warehouseId as {
     _id: Types.ObjectId;
@@ -459,7 +482,14 @@ function mapMovementRow(m: MovementDoc) {
     notes: m.notes,
     invoiceLastWorkedAt: m.invoiceLastWorkedAt?.toISOString(),
     transferId: m.transferId ? String(m.transferId) : undefined,
-    product: { id: String(product._id), name: product.name, secondaryName: product.secondaryName },
+    product: {
+      id: String(product._id),
+      name: product.name,
+      secondaryName: product.secondaryName,
+      stockUnit: product.stockUnit,
+      unitsPerStockUnit: product.unitsPerStockUnit,
+      baseUnit: product.baseUnit,
+    },
     brand: { id: String(brand._id), name: brand.name },
     warehouse: {
       id: String(warehouse._id),
@@ -732,7 +762,7 @@ export async function listMovementHistory(query: MovementsQuery) {
       .sort(sortField)
       .skip(skip)
       .limit(limit)
-      .populate("productId", "name secondaryName")
+      .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
       .populate("brandId", "name")
       .populate("warehouseId", "name code")
       .populate("destinationWarehouseId", "name code")
@@ -761,58 +791,75 @@ export async function listLowStock(query: LowStockQuery) {
     fetchStockRows(sharedFilters),
   ]);
 
-  const lowItems = warehouseScopedRows.filter(isWarehouseLowStock);
+  const warehouseLowRows = warehouseScopedRows.filter(isWarehouseLowStock);
+  const allWarehouseLowRows = allWarehouseRows.filter(isWarehouseLowStock);
+  const totalLowRows = buildLowStockTotals(allWarehouseRows);
 
-  const filteredWarehouseItems = lowItems.filter(
-    (r) =>
-      !query.search?.trim() ||
-      [r.productName, r.secondaryProductName ?? "", r.brandName, r.warehouseName, r.warehouseCode].some(
-        (s) => s.toLowerCase().includes(query.search!.trim().toLowerCase())
-      )
+  const matchesSearch = (parts: string[]) =>
+    !query.search?.trim() ||
+    parts.some((value) =>
+      value.toLowerCase().includes(query.search!.trim().toLowerCase())
+    );
+
+  const filteredWarehouseItems = warehouseLowRows.filter((row) =>
+    matchesSearch([
+      row.productName,
+      row.secondaryProductName ?? "",
+      row.brandName,
+      row.warehouseName,
+      row.warehouseCode,
+    ])
   );
 
-  const sortedWarehouseItems = sortRows(
-    filteredWarehouseItems,
+  const totalLowProductIds = new Set(
+    totalLowRows
+      .filter((row) =>
+        matchesSearch([row.productName, row.secondaryProductName ?? "", row.brandName])
+      )
+      .map((row) => row.productId)
+  );
+
+  const groupedProducts = groupLowStockByProduct(allWarehouseRows, {
+    warehouseLowItems: query.warehouseId ? filteredWarehouseItems : allWarehouseLowRows.filter((row) =>
+      matchesSearch([
+        row.productName,
+        row.secondaryProductName ?? "",
+        row.brandName,
+        row.warehouseName,
+        row.warehouseCode,
+      ])
+    ),
+    totalLowProductIds,
+  });
+
+  const sortedProducts = sortRows(
+    groupedProducts,
     query.sortBy ?? "quantity",
     query.sortOrder ?? "asc",
     {
-      quantity: (r) => r.quantity,
-      productName: (r) => r.productName,
-      brandName: (r) => r.brandName,
-      warehouseName: (r) => r.warehouseName,
-      lowStockThreshold: (r) => r.lowStockThreshold ?? 0,
+      quantity: (p) => p.sortQuantity,
+      productName: (p) => p.productName,
+      brandName: (p) => p.brandName,
+      warehouseName: (p) => p.sortQuantity,
+      lowStockThreshold: (p) => p.sortLowStockThreshold,
     }
   );
 
-  const totalRows = buildLowStockTotals(allWarehouseRows).filter(
-    (r) =>
-      !query.search?.trim() ||
-      [r.productName, r.secondaryProductName ?? "", r.brandName].some((s) =>
-        s.toLowerCase().includes(query.search!.trim().toLowerCase())
-      )
-  );
+  const warehouseColumns = extractWarehouseColumns(allWarehouseRows);
 
-  const sortedTotalRows = sortRows(
-    totalRows,
-    query.sortBy === "warehouseName" ? "totalQuantity" : (query.sortBy ?? "totalQuantity"),
-    query.sortOrder ?? "asc",
-    {
-      totalQuantity: (r) => r.totalQuantity,
-      quantity: (r) => r.totalQuantity,
-      productName: (r) => r.productName,
-      brandName: (r) => r.brandName,
-      lowStockThreshold: (r) => r.totalLowStockThreshold,
-    }
-  );
-
-  const { items, pagination } = paginateArray(sortedWarehouseItems, query);
+  const { items, pagination } = paginateArray(sortedProducts, query);
 
   return {
-    count: filteredWarehouseItems.length,
-    items,
+    count: groupedProducts.length,
+    warehouses: warehouseColumns,
+    items: items.map(
+      ({
+        sortQuantity: _sortQuantity,
+        sortLowStockThreshold: _sortLowStockThreshold,
+        ...product
+      }) => product
+    ),
     pagination,
-    totalCount: sortedTotalRows.length,
-    totals: sortedTotalRows,
   };
 }
 
@@ -842,12 +889,20 @@ export async function getAdminDashboard() {
         .lean(),
     ]);
 
-  const lowStock = await listLowStock({
-    page: 1,
-    limit: 10,
-    sortBy: "quantity",
-    sortOrder: "asc",
-  });
+  const lowWarehouseItems = allRows.filter(isWarehouseLowStock);
+  const sortedLowWarehouseItems = sortRows(
+    lowWarehouseItems,
+    "quantity",
+    "asc",
+    {
+      quantity: (r) => r.quantity,
+      productName: (r) => r.productName,
+      brandName: (r) => r.brandName,
+      warehouseName: (r) => r.warehouseName,
+      lowStockThreshold: (r) => r.lowStockThreshold ?? 0,
+    }
+  );
+  const lowTotals = buildLowStockTotals(allRows);
 
   const recentTransfers = await Transfer.find()
     .sort({ createdAt: -1 })
@@ -912,8 +967,8 @@ export async function getAdminDashboard() {
     totalSkus: stockSummary.totalSkus,
     warehouseCount: warehouses.length,
     pendingTransfers,
-    lowStockCount: lowStock.count,
-    lowStockItems: lowStock.items.map((row) => ({
+    lowStockCount: lowWarehouseItems.length,
+    lowStockItems: sortedLowWarehouseItems.slice(0, 10).map((row) => ({
       warehouseId: row.warehouseId,
       warehouseName: row.warehouseName,
       warehouseCode: row.warehouseCode,
@@ -929,8 +984,8 @@ export async function getAdminDashboard() {
       unitsPerStockUnit: row.unitsPerStockUnit,
       baseUnit: row.baseUnit,
     })),
-    lowStockTotalCount: lowStock.totalCount,
-    lowStockTotals: lowStock.totals.map((row) => ({
+    lowStockTotalCount: lowTotals.length,
+    lowStockTotals: lowTotals.slice(0, 10).map((row) => ({
       productId: row.productId,
       productName: row.productName,
       secondaryProductName: row.secondaryProductName,
@@ -959,7 +1014,9 @@ function buildStockSummary(rows: StockRow[]) {
 
   for (const r of rows) {
     totalUnits += r.quantity;
-    uniqueProducts.add(r.productId);
+    if (r.quantity > 0) {
+      uniqueProducts.add(r.productId);
+    }
     const wh = byWarehouse.get(r.warehouseId) ?? {
       warehouseId: r.warehouseId,
       name: r.warehouseName,
@@ -968,7 +1025,9 @@ function buildStockSummary(rows: StockRow[]) {
       skuCount: 0,
     };
     wh.totalUnits += r.quantity;
-    wh.skuCount += 1;
+    if (r.quantity > 0) {
+      wh.skuCount += 1;
+    }
     byWarehouse.set(r.warehouseId, wh);
   }
 
@@ -1093,6 +1152,38 @@ export async function ensureProductBalancesForAllWarehouses(productId: string) {
   if (missing.length > 0) {
     await InventoryBalance.insertMany(missing);
   }
+}
+
+/** Ensures every active warehouse has an explicit low-stock threshold (default 10 cartons). */
+export async function ensureDefaultWarehouseLowStockThresholds(productId: string) {
+  if (!Types.ObjectId.isValid(productId)) {
+    throw new BadRequestError("Invalid product");
+  }
+
+  const product = await Product.findById(productId).lean();
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+
+  const per = product.unitsPerStockUnit ?? 1;
+  const defaultBase = defaultLowStockThresholdBase(per);
+
+  if (product.totalLowStockThreshold == null) {
+    await Product.updateOne(
+      { _id: productId },
+      { $set: { totalLowStockThreshold: defaultBase } }
+    );
+  }
+
+  await ensureProductBalancesForAllWarehouses(productId);
+
+  await InventoryBalance.updateMany(
+    {
+      productId,
+      $or: [{ lowStockThreshold: { $exists: false } }, { lowStockThreshold: null }],
+    },
+    { $set: { lowStockThreshold: defaultBase } }
+  );
 }
 
 export async function updateLowStockThreshold(
@@ -1303,6 +1394,41 @@ export async function updateProductWarehouseThresholds(
 }
 
 export async function listInvoiceMovements(query: InvoiceListQuery) {
+  const rows = await fetchInvoiceMovementRows(query);
+  const sortBy = query.sortBy ?? "createdAt";
+  const sorted = sortInvoiceMovementRows(rows, sortBy, query.sortOrder ?? "desc");
+  const { items, pagination } = paginateArray(sorted, query);
+  return { items, pagination };
+}
+
+export type InvoiceGroupLine = {
+  movementId: string;
+  productId: string;
+  productName: string;
+  secondaryProductName?: string;
+  brandName: string;
+  quantity: number;
+  stockUnit?: string;
+  unitsPerStockUnit?: number;
+  baseUnit?: string;
+  type: "STOCK_IN" | "STOCK_OUT";
+  dispatchType?: string;
+  invoiceLastWorkedAt?: string;
+  createdAt: string;
+};
+
+export type InvoiceGroup = {
+  id: string;
+  invoiceNumber: string;
+  clientName: string;
+  createdAt: string;
+  voucherType: string;
+  warehouse?: { id: string; name: string; code: string };
+  lastWorkedMovementId?: string;
+  lines: InvoiceGroupLine[];
+};
+
+async function resolveInvoiceMovementFilter(query: Pick<InvoiceListQuery, "search">) {
   const filter: Record<string, unknown> = {
     $or: [
       { dispatchType: DispatchType.DIRECT_SELLING },
@@ -1328,27 +1454,144 @@ export async function listInvoiceMovements(query: InvoiceListQuery) {
     delete filter.$or;
   }
 
-  const sortBy = query.sortBy ?? "createdAt";
-  const { page, limit, skip, sortOrder } = getPaginationParams(query);
-  const sortField = mongoSort(sortBy, sortOrder);
+  return filter;
+}
 
-  const [total, movements] = await Promise.all([
-    StockMovement.countDocuments(filter),
-    StockMovement.find(filter)
-      .sort(sortField)
-      .skip(skip)
-      .limit(limit)
-      .populate("productId", "name secondaryName")
-      .populate("brandId", "name")
-      .populate("warehouseId", "name code")
-      .populate("destinationWarehouseId", "name code")
-      .lean(),
-  ]);
+async function fetchInvoiceMovementRows(_query: Pick<InvoiceListQuery, "search">) {
+  const filter = await resolveInvoiceMovementFilter(_query);
 
+  const movements = await StockMovement.find(filter)
+    .sort({ createdAt: -1 })
+    .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
+    .populate("brandId", "name")
+    .populate("warehouseId", "name code")
+    .populate("destinationWarehouseId", "name code")
+    .lean();
+
+  return (movements as MovementDoc[]).map((m) => mapMovementRow(m));
+}
+
+function voucherTypeLabel(row: ReturnType<typeof mapMovementRow>): string {
+  if (row.type === "STOCK_IN") return "Return";
+  if (row.dispatchType === "DIRECT_SELLING") return "Sales";
+  if (row.dispatchType === "TRANSFER") return "Transfer";
+  return row.type === "STOCK_OUT" ? "Stock Out" : "Stock In";
+}
+
+function buildInvoiceGroupKey(row: ReturnType<typeof mapMovementRow>): string {
+  const invoice = row.invoiceNumber?.trim();
+  if (invoice) {
+    return [
+      invoice.toLowerCase(),
+      (row.clientName?.trim() ?? "").toLowerCase(),
+      row.warehouse?.id ?? "",
+      row.type,
+      row.dispatchType ?? "",
+    ].join("|");
+  }
+  return `movement:${row.id}`;
+}
+
+function movementCreatedAtIso(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function toInvoiceGroupLine(row: ReturnType<typeof mapMovementRow>): InvoiceGroupLine {
   return {
-    items: (movements as MovementDoc[]).map((m) => mapMovementRow(m)),
-    pagination: buildPaginationMeta(total, page, limit),
+    movementId: row.id,
+    productId: row.product?.id ?? "",
+    productName: row.product?.name ?? "Unknown product",
+    secondaryProductName: row.product?.secondaryName,
+    brandName: row.brand?.name ?? "",
+    quantity: row.quantity,
+    stockUnit: row.product?.stockUnit,
+    unitsPerStockUnit: row.product?.unitsPerStockUnit,
+    baseUnit: row.product?.baseUnit,
+    type: row.type,
+    dispatchType: row.dispatchType,
+    invoiceLastWorkedAt: row.invoiceLastWorkedAt,
+    createdAt: movementCreatedAtIso(row.createdAt),
   };
+}
+
+function groupInvoiceMovementRows(rows: ReturnType<typeof mapMovementRow>[]): InvoiceGroup[] {
+  const groups = new Map<string, InvoiceGroup>();
+
+  for (const row of rows) {
+    const key = buildInvoiceGroupKey(row);
+    const existing = groups.get(key);
+
+    if (!existing) {
+      groups.set(key, {
+        id: key,
+        invoiceNumber: row.invoiceNumber?.trim() ?? "",
+        clientName: row.clientName?.trim() ?? "",
+        createdAt: movementCreatedAtIso(row.createdAt),
+        voucherType: voucherTypeLabel(row),
+        warehouse: row.warehouse,
+        lastWorkedMovementId: row.invoiceLastWorkedAt ? row.id : undefined,
+        lines: [toInvoiceGroupLine(row)],
+      });
+      continue;
+    }
+
+    existing.lines.push(toInvoiceGroupLine(row));
+    if (new Date(row.createdAt).getTime() < new Date(existing.createdAt).getTime()) {
+      existing.createdAt = movementCreatedAtIso(row.createdAt);
+    }
+    if (row.invoiceLastWorkedAt) {
+      existing.lastWorkedMovementId = row.id;
+    }
+  }
+
+  for (const group of groups.values()) {
+    group.lines.sort((a, b) => a.productName.localeCompare(b.productName));
+  }
+
+  return Array.from(groups.values());
+}
+
+function sortInvoiceMovementRows(
+  rows: ReturnType<typeof mapMovementRow>[],
+  sortBy: NonNullable<InvoiceListQuery["sortBy"]>,
+  sortOrder: "asc" | "desc"
+) {
+  return sortRows(rows, sortBy, sortOrder, {
+    createdAt: (r) => new Date(r.createdAt).getTime(),
+    clientName: (r) => r.clientName ?? "",
+    invoiceNumber: (r) => r.invoiceNumber ?? "",
+    quantity: (r) => r.quantity,
+    type: (r) => r.type,
+    invoiceLastWorkedAt: (r) => r.invoiceLastWorkedAt ?? "",
+  });
+}
+
+function sortInvoiceGroups(
+  groups: InvoiceGroup[],
+  sortBy: NonNullable<InvoiceListQuery["sortBy"]>,
+  sortOrder: "asc" | "desc"
+) {
+  return sortRows(groups, sortBy, sortOrder, {
+    createdAt: (g) => new Date(g.createdAt).getTime(),
+    clientName: (g) => g.clientName,
+    invoiceNumber: (g) => g.invoiceNumber,
+    quantity: (g) => g.lines.reduce((sum, line) => sum + line.quantity, 0),
+    type: (g) => g.voucherType,
+    invoiceLastWorkedAt: (g) =>
+      g.lines.find((line) => line.invoiceLastWorkedAt)?.invoiceLastWorkedAt ?? "",
+  });
+}
+
+export async function listInvoiceGroups(query: InvoiceListQuery) {
+  const rows = await fetchInvoiceMovementRows(query);
+  const sortBy = query.sortBy ?? "createdAt";
+  const groups = sortInvoiceGroups(
+    groupInvoiceMovementRows(rows),
+    sortBy,
+    query.sortOrder ?? "desc"
+  );
+  const { items, pagination } = paginateArray(groups, query);
+  return { items, pagination };
 }
 
 export async function searchMovementsForInvoiceFix(query: InvoiceLookupQuery) {
@@ -1407,6 +1650,9 @@ export async function updateMovementInvoice(
         movement.dispatchType !== DispatchType.DIRECT_SELLING
       ) {
         throw new BadRequestError("Quantity can only be updated on client sale invoices");
+      }
+      if (nextQuantity < 0) {
+        throw new BadRequestError("Quantity cannot be negative");
       }
       const delta = previousQuantity - nextQuantity;
       if (delta < 0) {

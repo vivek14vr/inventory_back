@@ -63,7 +63,7 @@ describe("parseProductExcelBuffer", () => {
     assert.equal(rows[0].totalLowStockThreshold, 1000);
   });
 
-  it("keeps legacy low quantity cartoon column as per-warehouse default fallback", () => {
+  it("maps legacy low quantity cartoon column to total low stock", () => {
     const rows = parseProductExcelBuffer(
       buildWorkbook([
         {
@@ -76,7 +76,8 @@ describe("parseProductExcelBuffer", () => {
       ])
     );
 
-    assert.equal(rows[0].lowStockThreshold, 3200);
+    assert.equal(rows[0].totalLowStockThreshold, 3200);
+    assert.equal(rows[0].lowStockThreshold, undefined);
   });
 
   it("keeps low stock in base units when pack size is 1", () => {

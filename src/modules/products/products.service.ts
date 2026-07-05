@@ -11,12 +11,19 @@ import {
   mongoSort,
 } from "../../shared/pagination/pagination.js";
 import { normalizeProductName } from "../../shared/utils/productName.js";
-import { getWarehouseLowStockOverridesForProducts } from "../inventory/inventory.service.js";
+import {
+  resolveLowStockThresholdWithDefault,
+} from "../../shared/constants/lowStockDefaults.js";
 import type {
   CreateProductInput,
   ListProductsQuery,
   UpdateProductInput,
 } from "./products.validation.js";
+import {
+  ensureDefaultWarehouseLowStockThresholds,
+  ensureProductBalancesForAllWarehouses,
+  getWarehouseLowStockOverridesForProducts,
+} from "../inventory/inventory.service.js";
 
 type ProductDoc = {
   _id: Types.ObjectId;
@@ -201,8 +208,10 @@ export async function createProduct(input: CreateProductInput) {
       baseUnit: input.baseUnit ?? "piece",
       stockUnit: input.stockUnit ?? "unit",
       unitsPerStockUnit: input.unitsPerStockUnit ?? 1,
-      lowStockThreshold: input.lowStockThreshold,
-      totalLowStockThreshold: input.totalLowStockThreshold,
+      totalLowStockThreshold: resolveLowStockThresholdWithDefault(
+        input.totalLowStockThreshold,
+        input.unitsPerStockUnit ?? 1
+      ),
       isActive: input.isActive ?? true,
     });
 
@@ -210,7 +219,11 @@ export async function createProduct(input: CreateProductInput) {
       .populate("brandId", "name isActive")
       .lean();
 
-    return toPublicProduct(populated as ProductDoc);
+    const publicProduct = toPublicProduct(populated as ProductDoc);
+    await ensureProductBalancesForAllWarehouses(publicProduct.id);
+    await ensureDefaultWarehouseLowStockThresholds(publicProduct.id);
+
+    return publicProduct;
   } catch (err: unknown) {
     if ((err as { code?: number }).code === 11000) {
       throw new BadRequestError(

@@ -14,6 +14,10 @@ import {
   ensureProductBalancesForAllWarehouses,
   updateProductWarehouseThresholds,
 } from "../inventory/inventory.service.js";
+import {
+  defaultLowStockThresholdBase,
+  resolveLowStockThresholdWithDefault,
+} from "../../shared/constants/lowStockDefaults.js";
 import type { ProductImportConfirmInput } from "./imports.validation.js";
 
 export type WarehouseLowStockImportEntry = {
@@ -29,9 +33,9 @@ export type ParsedProductImportRow = {
   secondaryName?: string;
   baseUnit: string;
   unitsPerStockUnit: number;
-  /** Per-warehouse fallback when a location has no custom threshold. */
+  /** @deprecated Per-warehouse product fallback — no longer set from Excel. */
   lowStockThreshold?: number;
-  /** Combined low-stock alert across all warehouses (independent of per-warehouse values). */
+  /** Overall low-stock alert across all warehouses (independent of warehouse values). */
   totalLowStockThreshold?: number;
   warehouseLowStockThresholds?: WarehouseLowStockImportEntry[];
   stockUnit: string;
@@ -248,7 +252,7 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     "total low stock unit",
     "total low stock units",
   ]);
-  const legacyDefaultLowPackKey = findColumnKey(keys, [
+  const legacyTotalLowPackKey = findColumnKey(keys, [
     "low quantity cartoon",
     "low quantity carton",
     "low stock carton",
@@ -256,6 +260,12 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     "low stock box",
     "low stock",
     "low quantity",
+  ]);
+  const legacyTotalLowUnitKey = findColumnKey(keys, [
+    "low quantity unit",
+    "low quantity units",
+    "low stock unit",
+    "low stock units",
   ]);
   const warehouseLowStockGroups = detectWarehouseLowStockColumns(keys);
   const trackedKeys = new Set(
@@ -267,7 +277,8 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       unitsPerPackKey,
       explicitTotalLowPackKey,
       explicitTotalLowUnitKey,
-      legacyDefaultLowPackKey,
+      legacyTotalLowPackKey,
+      legacyTotalLowUnitKey,
       ...warehouseLowStockGroups.flatMap((g) => [g.unitKey, g.packKey]),
     ].filter((key): key is string => Boolean(key))
   );
@@ -294,8 +305,11 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     const rawTotalLowPack = explicitTotalLowPackKey
       ? String(row[explicitTotalLowPackKey] ?? "").trim()
       : "";
-    const rawDefaultLowPack = legacyDefaultLowPackKey
-      ? String(row[legacyDefaultLowPackKey] ?? "").trim()
+    const rawLegacyTotalLowPack = legacyTotalLowPackKey
+      ? String(row[legacyTotalLowPackKey] ?? "").trim()
+      : "";
+    const rawLegacyTotalLowUnit = legacyTotalLowUnitKey
+      ? String(row[legacyTotalLowUnitKey] ?? "").trim()
       : "";
 
     if (
@@ -306,7 +320,8 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       !rawUnitsPerPack &&
       !rawTotalLowUnit &&
       !rawTotalLowPack &&
-      !rawDefaultLowPack &&
+      !rawLegacyTotalLowPack &&
+      !rawLegacyTotalLowUnit &&
       !rowHasAnyValue(row, Array.from(trackedKeys))
     ) {
       return;
@@ -318,16 +333,17 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       Number.isFinite(unitsPerStockUnit) && unitsPerStockUnit > 0
         ? Math.round(unitsPerStockUnit)
         : 1;
-    const totalLowStockThreshold = resolveLowStockValue(
-      parseNumericCell(rawTotalLowUnit),
-      parseNumericCell(rawTotalLowPack),
-      per
-    );
-    const lowStockThreshold = resolveLowStockValue(
-      undefined,
-      parseNumericCell(rawDefaultLowPack),
-      per
-    );
+    const totalLowStockThreshold =
+      resolveLowStockValue(
+        parseNumericCell(rawTotalLowUnit),
+        parseNumericCell(rawTotalLowPack),
+        per
+      ) ??
+      resolveLowStockValue(
+        parseNumericCell(rawLegacyTotalLowUnit),
+        parseNumericCell(rawLegacyTotalLowPack),
+        per
+      );
     const warehouseLowStockThresholds = parseWarehouseLowStockThresholds(
       row,
       warehouseLowStockGroups,
@@ -343,7 +359,6 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       secondaryName,
       baseUnit,
       unitsPerStockUnit: per,
-      lowStockThreshold,
       totalLowStockThreshold,
       warehouseLowStockThresholds:
         warehouseLowStockThresholds.length > 0 ? warehouseLowStockThresholds : undefined,
@@ -411,32 +426,65 @@ function resolveWarehouseImportEntries(
 
 async function applyImportedWarehouseThresholds(
   productId: string,
-  thresholds: WarehouseLowStockImportEntry[] | undefined,
+  thresholds: WarehouseLowStockImportEntry[],
+  unitsPerStockUnit: number,
   user: AuthUser
 ) {
-  const rows = (thresholds ?? []).filter(
-    (entry): entry is WarehouseLowStockImportEntry & { warehouseId: string } =>
-      Boolean(entry.warehouseId)
-  );
-  if (rows.length === 0) return;
+  if (thresholds.length === 0) return;
 
   await updateProductWarehouseThresholds(
     productId,
-    rows.map((entry) => ({
-      warehouseId: entry.warehouseId,
-      lowStockThreshold: entry.lowStockThreshold,
+    thresholds.map((entry) => ({
+      warehouseId: entry.warehouseId!,
+      lowStockThreshold: resolveLowStockThresholdWithDefault(
+        entry.lowStockThreshold,
+        unitsPerStockUnit
+      ),
     })),
     user
   );
 }
 
+function buildWarehouseThresholdsWithDefaults(
+  parsed: ParsedProductImportRow,
+  warehouses: Array<{ _id: Types.ObjectId; name: string; code: string }>
+): WarehouseLowStockImportEntry[] {
+  const importedByKey = new Map<string, number>();
+  for (const entry of parsed.warehouseLowStockThresholds ?? []) {
+    importedByKey.set(entry.warehouseName.trim().toLowerCase(), entry.lowStockThreshold);
+  }
+
+  return warehouses.map((warehouse) => {
+    const nameKey = warehouse.name.trim().toLowerCase();
+    const codeKey = warehouse.code.trim().toLowerCase();
+    const imported =
+      importedByKey.get(nameKey) ?? importedByKey.get(codeKey);
+    return {
+      warehouseName: warehouse.name,
+      warehouseId: String(warehouse._id),
+      lowStockThreshold: resolveLowStockThresholdWithDefault(
+        imported,
+        parsed.unitsPerStockUnit
+      ),
+    };
+  });
+}
+
 async function finalizeImportedProduct(
   productId: string,
-  warehouseThresholds: WarehouseLowStockImportEntry[] | undefined,
+  parsed: ParsedProductImportRow,
   user: AuthUser
 ) {
   await ensureProductBalancesForAllWarehouses(productId);
-  await applyImportedWarehouseThresholds(productId, warehouseThresholds, user);
+
+  const warehouses = await Warehouse.find({ isActive: true }).select("name code").lean();
+  const warehouseThresholds = buildWarehouseThresholdsWithDefaults(parsed, warehouses);
+  await applyImportedWarehouseThresholds(
+    productId,
+    warehouseThresholds,
+    parsed.unitsPerStockUnit,
+    user
+  );
 }
 
 async function loadImportContext() {
@@ -645,8 +693,10 @@ function productPayloadFromRow(row: ParsedProductImportRow, brandId: string) {
     baseUnit,
     stockUnit: per > 1 ? row.stockUnit || "carton" : baseUnit,
     unitsPerStockUnit: per,
-    lowStockThreshold: row.lowStockThreshold,
-    totalLowStockThreshold: row.totalLowStockThreshold,
+    totalLowStockThreshold: resolveLowStockThresholdWithDefault(
+      row.totalLowStockThreshold,
+      per
+    ),
     isActive: true,
   };
 }
@@ -774,16 +824,11 @@ export async function confirmProductImport(
           baseUnit: payload.baseUnit,
           stockUnit: payload.stockUnit,
           unitsPerStockUnit: payload.unitsPerStockUnit,
-          lowStockThreshold: payload.lowStockThreshold ?? null,
-          totalLowStockThreshold: payload.totalLowStockThreshold ?? null,
+          totalLowStockThreshold: payload.totalLowStockThreshold,
           secondaryName: nextSecondary,
           ...(wasInactive ? { isActive: true } : {}),
         });
-        await finalizeImportedProduct(
-          String(targetProduct._id),
-          parsed.warehouseLowStockThresholds,
-          user
-        );
+        await finalizeImportedProduct(String(targetProduct._id), parsed, user);
 
         if (wasInactive) {
           const idx = allProducts.findIndex(
@@ -807,7 +852,7 @@ export async function confirmProductImport(
       }
 
       const created = await createProduct(productPayloadFromRow(parsed, brandId));
-      await finalizeImportedProduct(created.id, parsed.warehouseLowStockThresholds, user);
+      await finalizeImportedProduct(created.id, parsed, user);
       const fresh = await Product.findById(created.id).lean();
       if (fresh) products.push(fresh);
 

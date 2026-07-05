@@ -113,7 +113,7 @@ export const invoiceLookupQuerySchema = invoiceListQuerySchema.refine(
 export const updateMovementInvoiceSchema = z.object({
   invoiceNumber: z.string().max(100).optional(),
   clientName: z.string().max(200).optional(),
-  quantity: z.coerce.number().int().min(1).optional(),
+  quantity: z.coerce.number().int().min(0).optional(),
   markLastWorked: z.boolean().optional(),
 });
 

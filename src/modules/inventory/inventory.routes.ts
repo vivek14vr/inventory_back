@@ -122,6 +122,19 @@ router.patch(
 );
 
 router.get(
+  "/invoices/grouped",
+  requireAdminOrPermission(Permission.INVENTORY_VIEW),
+  asyncHandler(async (req, res) => {
+    const parsed = invoiceListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
+    }
+    const { items, pagination } = await inventoryAdminService.listInvoiceGroups(parsed.data);
+    sendSuccess(res, items, 200, { pagination });
+  })
+);
+
+router.get(
   "/invoices",
   requireAdminOrPermission(Permission.INVENTORY_VIEW),
   asyncHandler(async (req, res) => {

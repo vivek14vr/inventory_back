@@ -32,7 +32,13 @@ import {
   sortRows,
 } from "../../shared/pagination/pagination.js";
 import * as inventoryService from "./inventory.service.js";
-import type { BalancesQuery, StockInInput, StockOutInput } from "./stock.validation.js";
+import type {
+  BalancesQuery,
+  ProductAvailabilityQuery,
+  StockInInput,
+  StockOutBatchInput,
+  StockOutInput,
+} from "./stock.validation.js";
 
 function toMovementResponse(doc: {
   _id: Types.ObjectId;
@@ -108,10 +114,10 @@ export async function listMovements(user: AuthUser, limit = 50) {
 }
 
 export async function listBalancesForUser(user: AuthUser, query: BalancesQuery) {
-  const warehouseId = resolveWarehouseId(
+  const warehouseId = resolveWarehouseIdForAnyPermission(
     user,
-    query.warehouseId,
-    Permission.STOCK_VIEW
+    [Permission.STOCK_VIEW, Permission.STOCK_OUT, Permission.STOCK_IN],
+    query.warehouseId
   );
 
   if (query.productId) {
@@ -151,13 +157,72 @@ export async function listBalancesForUser(user: AuthUser, query: BalancesQuery) 
     (r) => r.secondaryProductName ?? "",
     (r) => r.brandName,
   ]);
+  if (query.brandId) {
+    filtered = filtered.filter((row) => row.brandId === query.brandId);
+  }
   filtered = sortRows(filtered, query.sortBy, query.sortOrder ?? "desc", {
     quantity: (r) => r.quantity,
     productName: (r) => r.productName,
     brandName: (r) => r.brandName,
-    updatedAt: (r) => r.updatedAt.getTime(),
+    updatedAt: (r) => {
+      const value = r.updatedAt;
+      if (value instanceof Date) return value.getTime();
+      if (value) return new Date(value as string).getTime();
+      return 0;
+    },
   });
   return paginateArray(filtered, query);
+}
+
+export async function listProductAvailability(
+  user: AuthUser,
+  query: ProductAvailabilityQuery
+) {
+  const warehouseId = resolveWarehouseIdForAnyPermission(
+    user,
+    [Permission.STOCK_VIEW, Permission.STOCK_OUT, Permission.STOCK_IN],
+    query.warehouseId
+  );
+
+  if (!Types.ObjectId.isValid(query.brandId)) {
+    throw new BadRequestError("Invalid brand ID");
+  }
+
+  const [warehouse, brand] = await Promise.all([
+    Warehouse.findOne({ _id: warehouseId, isActive: true }).lean(),
+    Brand.findOne({ _id: query.brandId, isActive: true }).lean(),
+  ]);
+
+  if (!warehouse) {
+    throw new NotFoundError("Warehouse not found");
+  }
+  if (!brand) {
+    throw new NotFoundError("Brand not found");
+  }
+
+  const products = await Product.find({
+    brandId: query.brandId,
+    isActive: true,
+  })
+    .sort({ name: 1 })
+    .lean();
+
+  const balances = await InventoryBalance.find({
+    warehouseId,
+    productId: { $in: products.map((p) => p._id) },
+  }).lean();
+
+  const quantityByProductId = new Map(
+    balances.map((balance) => [String(balance.productId), balance.quantity])
+  );
+
+  return products.map((product) => ({
+    productId: String(product._id),
+    quantity: quantityByProductId.get(String(product._id)) ?? 0,
+    stockUnit: product.stockUnit ?? "unit",
+    unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
+    baseUnit: product.baseUnit ?? "piece",
+  }));
 }
 
 export async function stockIn(input: StockInInput, user: AuthUser) {
@@ -592,5 +657,140 @@ export async function stockOut(input: StockOutInput, user: AuthUser) {
     ),
     balance: txnResult.balance,
     transferId: txnResult.transferId,
+  };
+}
+
+type ValidatedSaleLine = {
+  productId: Types.ObjectId;
+  brandId: Types.ObjectId;
+  productName: string;
+  brandName: string;
+  quantity: number;
+};
+
+export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
+  const warehouseId = resolveWarehouseId(
+    user,
+    input.warehouseId,
+    Permission.STOCK_OUT
+  );
+
+  const sourceWarehouse = await Warehouse.findById(warehouseId).lean();
+  if (!sourceWarehouse || sourceWarehouse.isActive === false) {
+    throw new BadRequestError("Selected warehouse is inactive");
+  }
+
+  const validatedLines: ValidatedSaleLine[] = [];
+  for (const item of input.items) {
+    const { productId, brandId, name: productName } =
+      await inventoryService.validateProductForBrand(item.productId, item.brandId);
+    const brand = await Brand.findById(brandId).lean();
+    validatedLines.push({
+      productId,
+      brandId,
+      productName,
+      brandName: brand?.name ?? "",
+      quantity: item.quantity,
+    });
+  }
+
+  const clientName = input.clientName.trim();
+  const invoiceNumber = input.invoiceNumber?.trim() || undefined;
+  const notes = input.notes?.trim() || undefined;
+
+  const txnResult = await runInTransaction(async (session) => {
+    for (const line of validatedLines) {
+      await inventoryService.assertSufficientStock(
+        warehouseId,
+        String(line.productId),
+        line.quantity,
+        session
+      );
+    }
+
+    const movementIds: Types.ObjectId[] = [];
+    const balances: Record<string, number> = {};
+
+    for (const line of validatedLines) {
+      const newQty = await inventoryService.adjustBalance(
+        warehouseId,
+        String(line.productId),
+        -line.quantity,
+        session
+      );
+      balances[String(line.productId)] = newQty;
+
+      const [movement] = await StockMovement.create(
+        [
+          {
+            type: StockMovementType.STOCK_OUT,
+            warehouseId,
+            productId: line.productId,
+            brandId: line.brandId,
+            quantity: line.quantity,
+            dispatchType: DispatchType.DIRECT_SELLING,
+            clientName,
+            invoiceNumber,
+            notes,
+            createdBy: user.id,
+          },
+        ],
+        dbSession(session)
+      );
+      movementIds.push(movement._id);
+
+      await AuditLog.create(
+        [
+          {
+            action: "STOCK_OUT",
+            entity: "StockMovement",
+            entityId: movement._id,
+            userId: user.id,
+            metadata: buildStockMovementAuditMetadata({
+              quantity: line.quantity,
+              warehouse: sourceWarehouse as {
+                _id: Types.ObjectId;
+                name: string;
+                code: string;
+              } | null,
+              product: { _id: line.productId, name: line.productName },
+              brand: { _id: line.brandId, name: line.brandName },
+              dispatchType: DispatchType.DIRECT_SELLING,
+              destinationWarehouse: null,
+              transferId: undefined,
+              clientName,
+              invoiceNumber,
+              notes,
+            }),
+          },
+        ],
+        dbSession(session)
+      );
+    }
+
+    return { movementIds, balances };
+  });
+
+  const populated = await StockMovement.find({ _id: { $in: txnResult.movementIds } })
+    .populate("productId", "name")
+    .populate("brandId", "name")
+    .populate("warehouseId", "name code")
+    .lean();
+
+  const order = new Map(
+    txnResult.movementIds.map((id, index) => [String(id), index])
+  );
+  populated.sort(
+    (a, b) =>
+      (order.get(String(a._id)) ?? 0) - (order.get(String(b._id)) ?? 0)
+  );
+
+  return {
+    movements: populated.map((m) =>
+      toMovementResponse(m as unknown as Parameters<typeof toMovementResponse>[0])
+    ),
+    balances: txnResult.balances,
+    invoiceNumber,
+    clientName,
   };
 }

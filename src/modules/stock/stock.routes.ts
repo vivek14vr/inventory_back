@@ -9,7 +9,13 @@ import {
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as stockService from "./stock.service.js";
-import { balancesQuerySchema, stockInSchema, stockOutSchema } from "./stock.validation.js";
+import {
+  balancesQuerySchema,
+  productAvailabilityQuerySchema,
+  stockInSchema,
+  stockOutBatchSchema,
+  stockOutSchema,
+} from "./stock.validation.js";
 
 const router = Router();
 
@@ -17,10 +23,13 @@ router.use(authenticate);
 
 router.get(
   "/balances",
-  requirePermission(Permission.STOCK_VIEW, {
-    warehouseIdFrom: "query",
-    allowScopedWithoutWarehouseId: true,
-  }),
+  requireAnyPermission(
+    [Permission.STOCK_VIEW, Permission.STOCK_OUT, Permission.STOCK_IN],
+    {
+      warehouseIdFrom: "query",
+      allowScopedWithoutWarehouseId: true,
+    }
+  ),
   asyncHandler(async (req, res) => {
     const parsed = balancesQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -31,6 +40,25 @@ router.get(
       parsed.data
     );
     sendSuccess(res, items, 200, { pagination });
+  })
+);
+
+router.get(
+  "/availability",
+  requireAnyPermission(
+    [Permission.STOCK_VIEW, Permission.STOCK_OUT, Permission.STOCK_IN],
+    {
+      warehouseIdFrom: "query",
+      allowScopedWithoutWarehouseId: true,
+    }
+  ),
+  asyncHandler(async (req, res) => {
+    const parsed = productAvailabilityQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
+    }
+    const items = await stockService.listProductAvailability(req.user!, parsed.data);
+    sendSuccess(res, items);
   })
 );
 
@@ -72,6 +100,19 @@ router.post(
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
     }
     const result = await stockService.stockOut(parsed.data, req.user!);
+    sendSuccess(res, result, 201);
+  })
+);
+
+router.post(
+  "/out/batch",
+  requirePermission(Permission.STOCK_OUT, { warehouseIdFrom: "body" }),
+  asyncHandler(async (req, res) => {
+    const parsed = stockOutBatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
+    }
+    const result = await stockService.stockOutBatch(parsed.data, req.user!);
     sendSuccess(res, result, 201);
   })
 );

@@ -124,45 +124,41 @@ export async function validateProductForBrand(
 }
 
 export async function listBalances(warehouseId: string) {
-  const balances = await InventoryBalance.find({ warehouseId, quantity: { $gt: 0 } })
-    .populate<{ productId: { _id: Types.ObjectId; name: string; secondaryName?: string; stockUnit?: string; unitsPerStockUnit?: number; isActive?: boolean; brandId: Types.ObjectId } }>({
-      path: "productId",
-      select: "name secondaryName stockUnit unitsPerStockUnit baseUnit isActive brandId",
-      populate: { path: "brandId", select: "name isActive" },
-    })
-    .sort({ updatedAt: -1 })
-    .lean();
+  const [products, balances] = await Promise.all([
+    Product.find({ isActive: true })
+      .populate<{ brandId: { _id: Types.ObjectId; name: string; isActive?: boolean } }>(
+        "brandId",
+        "name isActive"
+      )
+      .sort({ name: 1 })
+      .lean(),
+    InventoryBalance.find({ warehouseId }).lean(),
+  ]);
 
-  return balances
-    .filter((b) => b.productId && typeof b.productId === "object")
-    .filter((b) => {
-      const product = b.productId as unknown as {
-        isActive?: boolean;
-        brandId?: { isActive?: boolean };
-      };
-      return product.isActive !== false && product.brandId?.isActive !== false;
+  const balanceByProductId = new Map(
+    balances.map((balance) => [String(balance.productId), balance])
+  );
+
+  return products
+    .filter((product) => {
+      const brand = product.brandId as { isActive?: boolean } | null;
+      return brand?.isActive !== false;
     })
-    .map((b) => {
-      const product = b.productId as unknown as {
-        _id: Types.ObjectId;
-        name: string;
-        secondaryName?: string;
-        stockUnit?: string;
-        unitsPerStockUnit?: number;
-        baseUnit?: string;
-        brandId: { _id: Types.ObjectId; name: string };
-      };
+    .map((product) => {
+      const brand = product.brandId as { _id: Types.ObjectId; name: string };
+      const balance = balanceByProductId.get(String(product._id));
+
       return {
         productId: String(product._id),
         productName: product.name,
         secondaryProductName: product.secondaryName,
-        brandId: String(product.brandId._id),
-        brandName: product.brandId.name,
+        brandId: String(brand._id),
+        brandName: brand.name,
         stockUnit: product.stockUnit ?? "unit",
         unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
         baseUnit: product.baseUnit ?? "piece",
-        quantity: b.quantity,
-        updatedAt: b.updatedAt,
+        quantity: balance?.quantity ?? 0,
+        updatedAt: balance?.updatedAt ?? product.updatedAt,
       };
     });
 }
