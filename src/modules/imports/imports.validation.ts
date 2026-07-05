@@ -8,6 +8,16 @@ export const productImportConfirmRowSchema = z.object({
   baseUnit: z.string().min(1).max(50),
   unitsPerStockUnit: z.coerce.number().int().min(1),
   lowStockThreshold: z.coerce.number().int().min(0).optional(),
+  totalLowStockThreshold: z.coerce.number().int().min(0).optional(),
+  warehouseLowStockThresholds: z
+    .array(
+      z.object({
+        warehouseId: z.string().min(1),
+        warehouseName: z.string().min(1).max(200),
+        lowStockThreshold: z.coerce.number().int().min(0),
+      })
+    )
+    .optional(),
   action: z.enum(["merge", "create"]),
   mergeTargetProductId: z.string().optional(),
   brandAction: z.enum(["merge", "create"]),
@@ -16,7 +26,6 @@ export const productImportConfirmRowSchema = z.object({
 
 export const productImportConfirmSchema = z.object({
   fileName: z.string().max(255).optional(),
-  warehouseId: z.string().min(1, "Warehouse is required"),
   rows: z.array(productImportConfirmRowSchema).min(1),
 });
 

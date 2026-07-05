@@ -10,7 +10,17 @@ import { normalizeProductName } from "../../shared/utils/productName.js";
 import { findProductByBrandLabelOverlap } from "../../shared/utils/productLookup.js";
 import { createBrand } from "../brands/brands.service.js";
 import { createProduct, updateProduct } from "../products/products.service.js";
+import {
+  ensureProductBalancesForAllWarehouses,
+  updateProductWarehouseThresholds,
+} from "../inventory/inventory.service.js";
 import type { ProductImportConfirmInput } from "./imports.validation.js";
+
+export type WarehouseLowStockImportEntry = {
+  warehouseName: string;
+  warehouseId?: string;
+  lowStockThreshold: number;
+};
 
 export type ParsedProductImportRow = {
   rowNumber: number;
@@ -19,7 +29,11 @@ export type ParsedProductImportRow = {
   secondaryName?: string;
   baseUnit: string;
   unitsPerStockUnit: number;
+  /** Per-warehouse fallback when a location has no custom threshold. */
   lowStockThreshold?: number;
+  /** Combined low-stock alert across all warehouses (independent of per-warehouse values). */
+  totalLowStockThreshold?: number;
+  warehouseLowStockThresholds?: WarehouseLowStockImportEntry[];
   stockUnit: string;
 };
 
@@ -60,6 +74,7 @@ export type ProductImportResultRow = {
   baseUnit?: string;
   unitsPerStockUnit?: number;
   lowStockThreshold?: number;
+  warehouseLowStockThresholds?: WarehouseLowStockImportEntry[];
   brandAction?: "merge" | "create";
   mergeTargetBrandId?: string;
   status: "SUCCESS" | "FAILED";
@@ -78,6 +93,100 @@ function normalizeHeader(value: unknown): string {
 
 function findColumnKey(keys: string[], aliases: string[]): string | undefined {
   return keys.find((key) => aliases.includes(normalizeHeader(key)));
+}
+
+function parseNumericCell(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const value = Number(trimmed);
+  if (!Number.isFinite(value) || value < 0) return undefined;
+  return value;
+}
+
+function resolveLowStockValue(
+  unitQty: number | undefined,
+  packQty: number | undefined,
+  unitsPerStockUnit: number
+): number | undefined {
+  if (unitQty != null) {
+    return Math.round(unitQty);
+  }
+  if (packQty != null) {
+    return unitsPerStockUnit > 1
+      ? Math.round(packQty * unitsPerStockUnit)
+      : Math.round(packQty);
+  }
+  return undefined;
+}
+
+type WarehouseLowStockColumnGroup = {
+  warehouseLabel: string;
+  unitKey?: string;
+  packKey?: string;
+};
+
+function warehouseLabelFromColumn(key: string, kind: "pack" | "unit"): string | null {
+  const pattern =
+    kind === "pack"
+      ? /^low quantity (?:cartoon|carton|box) in (.+)$/i
+      : /^low quantity (?:unit|units) in (.+)$/i;
+  const match = key.trim().match(pattern);
+  return match ? match[1].trim() : null;
+}
+
+function detectWarehouseLowStockColumns(keys: string[]): WarehouseLowStockColumnGroup[] {
+  const byWarehouse = new Map<string, WarehouseLowStockColumnGroup>();
+
+  for (const key of keys) {
+    const packLabel = warehouseLabelFromColumn(key, "pack");
+    const unitLabel = warehouseLabelFromColumn(key, "unit");
+
+    if (packLabel) {
+      const mapKey = packLabel.toLowerCase();
+      const group = byWarehouse.get(mapKey) ?? { warehouseLabel: packLabel };
+      group.packKey = key;
+      byWarehouse.set(mapKey, group);
+    } else if (unitLabel) {
+      const mapKey = unitLabel.toLowerCase();
+      const group = byWarehouse.get(mapKey) ?? { warehouseLabel: unitLabel };
+      group.unitKey = key;
+      byWarehouse.set(mapKey, group);
+    }
+  }
+
+  return Array.from(byWarehouse.values());
+}
+
+function parseWarehouseLowStockThresholds(
+  row: Record<string, unknown>,
+  groups: WarehouseLowStockColumnGroup[],
+  unitsPerStockUnit: number
+): WarehouseLowStockImportEntry[] {
+  const entries: WarehouseLowStockImportEntry[] = [];
+
+  for (const group of groups) {
+    const unitRaw = group.unitKey ? String(row[group.unitKey] ?? "").trim() : "";
+    const packRaw = group.packKey ? String(row[group.packKey] ?? "").trim() : "";
+    if (!unitRaw && !packRaw) continue;
+
+    const threshold = resolveLowStockValue(
+      parseNumericCell(unitRaw),
+      parseNumericCell(packRaw),
+      unitsPerStockUnit
+    );
+    if (threshold == null) continue;
+
+    entries.push({
+      warehouseName: group.warehouseLabel,
+      lowStockThreshold: threshold,
+    });
+  }
+
+  return entries;
+}
+
+function rowHasAnyValue(row: Record<string, unknown>, keys: string[]): boolean {
+  return keys.some((key) => String(row[key] ?? "").trim() !== "");
 }
 
 export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[] {
@@ -123,7 +232,23 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     "units per box",
     "pieces per carton",
   ]);
-  const lowPackKey = findColumnKey(keys, [
+  const explicitTotalLowPackKey = findColumnKey(keys, [
+    "total low quantity cartoon",
+    "total low quantity carton",
+    "totallow quantity cartoon",
+    "totallow quantity carton",
+    "total low stock cartoon",
+    "total low stock carton",
+  ]);
+  const explicitTotalLowUnitKey = findColumnKey(keys, [
+    "total low quantity unit",
+    "total low quantity units",
+    "totallow quantity unit",
+    "totallow quantity units",
+    "total low stock unit",
+    "total low stock units",
+  ]);
+  const legacyDefaultLowPackKey = findColumnKey(keys, [
     "low quantity cartoon",
     "low quantity carton",
     "low stock carton",
@@ -132,6 +257,20 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     "low stock",
     "low quantity",
   ]);
+  const warehouseLowStockGroups = detectWarehouseLowStockColumns(keys);
+  const trackedKeys = new Set(
+    [
+      brandKey,
+      primaryKey,
+      secondaryKey,
+      unitKey,
+      unitsPerPackKey,
+      explicitTotalLowPackKey,
+      explicitTotalLowUnitKey,
+      legacyDefaultLowPackKey,
+      ...warehouseLowStockGroups.flatMap((g) => [g.unitKey, g.packKey]),
+    ].filter((key): key is string => Boolean(key))
+  );
 
   if (!brandKey || !primaryKey || !unitKey || !unitsPerPackKey) {
     throw new BadRequestError(
@@ -149,7 +288,15 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       : undefined;
     const rawUnit = String(row[unitKey] ?? "").trim();
     const rawUnitsPerPack = String(row[unitsPerPackKey] ?? "").trim();
-    const rawLowPack = lowPackKey ? String(row[lowPackKey] ?? "").trim() : "";
+    const rawTotalLowUnit = explicitTotalLowUnitKey
+      ? String(row[explicitTotalLowUnitKey] ?? "").trim()
+      : "";
+    const rawTotalLowPack = explicitTotalLowPackKey
+      ? String(row[explicitTotalLowPackKey] ?? "").trim()
+      : "";
+    const rawDefaultLowPack = legacyDefaultLowPackKey
+      ? String(row[legacyDefaultLowPackKey] ?? "").trim()
+      : "";
 
     if (
       !brandName &&
@@ -157,22 +304,37 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       !secondaryName &&
       !rawUnit &&
       !rawUnitsPerPack &&
-      !rawLowPack
+      !rawTotalLowUnit &&
+      !rawTotalLowPack &&
+      !rawDefaultLowPack &&
+      !rowHasAnyValue(row, Array.from(trackedKeys))
     ) {
       return;
     }
 
     const baseUnit = rawUnit || "piece";
     const unitsPerStockUnit = Number(rawUnitsPerPack);
-    const lowPackQty = rawLowPack === "" ? undefined : Number(rawLowPack);
+    const per =
+      Number.isFinite(unitsPerStockUnit) && unitsPerStockUnit > 0
+        ? Math.round(unitsPerStockUnit)
+        : 1;
+    const totalLowStockThreshold = resolveLowStockValue(
+      parseNumericCell(rawTotalLowUnit),
+      parseNumericCell(rawTotalLowPack),
+      per
+    );
+    const lowStockThreshold = resolveLowStockValue(
+      undefined,
+      parseNumericCell(rawDefaultLowPack),
+      per
+    );
+    const warehouseLowStockThresholds = parseWarehouseLowStockThresholds(
+      row,
+      warehouseLowStockGroups,
+      per
+    );
 
-    const stockUnit = unitsPerStockUnit > 1 ? "carton" : baseUnit;
-    const lowStockThreshold =
-      lowPackQty != null && Number.isFinite(lowPackQty) && lowPackQty >= 0
-        ? unitsPerStockUnit > 1
-          ? Math.round(lowPackQty * unitsPerStockUnit)
-          : Math.round(lowPackQty)
-        : undefined;
+    const stockUnit = per > 1 ? "carton" : baseUnit;
 
     rows.push({
       rowNumber: index + 2,
@@ -180,10 +342,11 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       primaryName,
       secondaryName,
       baseUnit,
-      unitsPerStockUnit: Number.isFinite(unitsPerStockUnit) && unitsPerStockUnit > 0
-        ? Math.round(unitsPerStockUnit)
-        : 1,
+      unitsPerStockUnit: per,
       lowStockThreshold,
+      totalLowStockThreshold,
+      warehouseLowStockThresholds:
+        warehouseLowStockThresholds.length > 0 ? warehouseLowStockThresholds : undefined,
       stockUnit,
     });
   });
@@ -212,6 +375,68 @@ function validateParsedRow(row: ParsedProductImportRow): string[] {
     errors.push("Primary and secondary names must be different");
   }
   return errors;
+}
+
+function resolveWarehouseImportEntries(
+  entries: WarehouseLowStockImportEntry[] | undefined,
+  warehouses: Array<{ _id: Types.ObjectId; name: string; code: string }>
+): { resolved: WarehouseLowStockImportEntry[]; errors: string[] } {
+  if (!entries?.length) {
+    return { resolved: [], errors: [] };
+  }
+
+  const resolved: WarehouseLowStockImportEntry[] = [];
+  const errors: string[] = [];
+
+  for (const entry of entries) {
+    const needle = entry.warehouseName.trim().toLowerCase();
+    const warehouse = warehouses.find(
+      (wh) =>
+        wh.name.trim().toLowerCase() === needle ||
+        wh.code.trim().toLowerCase() === needle
+    );
+    if (!warehouse) {
+      errors.push(`Unknown warehouse "${entry.warehouseName}" in low-stock columns`);
+      continue;
+    }
+    resolved.push({
+      warehouseName: warehouse.name,
+      warehouseId: String(warehouse._id),
+      lowStockThreshold: entry.lowStockThreshold,
+    });
+  }
+
+  return { resolved, errors };
+}
+
+async function applyImportedWarehouseThresholds(
+  productId: string,
+  thresholds: WarehouseLowStockImportEntry[] | undefined,
+  user: AuthUser
+) {
+  const rows = (thresholds ?? []).filter(
+    (entry): entry is WarehouseLowStockImportEntry & { warehouseId: string } =>
+      Boolean(entry.warehouseId)
+  );
+  if (rows.length === 0) return;
+
+  await updateProductWarehouseThresholds(
+    productId,
+    rows.map((entry) => ({
+      warehouseId: entry.warehouseId,
+      lowStockThreshold: entry.lowStockThreshold,
+    })),
+    user
+  );
+}
+
+async function finalizeImportedProduct(
+  productId: string,
+  warehouseThresholds: WarehouseLowStockImportEntry[] | undefined,
+  user: AuthUser
+) {
+  await ensureProductBalancesForAllWarehouses(productId);
+  await applyImportedWarehouseThresholds(productId, warehouseThresholds, user);
 }
 
 async function loadImportContext() {
@@ -316,9 +541,17 @@ export async function previewProductImport(fileBuffer: Buffer) {
   const parsedRows = parseProductExcelBuffer(fileBuffer);
   const { brands, brandByName, allBrandByName, brandIdToName, allProducts } =
     await loadImportContext();
+  const warehouses = await Warehouse.find({ isActive: true })
+    .select("name code")
+    .lean();
 
   const previewRows: ProductImportPreviewRow[] = parsedRows.map((row) => {
     const errors = validateParsedRow(row);
+    const warehouseResolution = resolveWarehouseImportEntries(
+      row.warehouseLowStockThresholds,
+      warehouses
+    );
+    errors.push(...warehouseResolution.errors);
     const brand = brandByName.get(row.brandName.trim().toLowerCase());
     const brandCategory = brand ? "matched" : "new";
     const brandExists = Boolean(brand);
@@ -365,6 +598,8 @@ export async function previewProductImport(fileBuffer: Buffer) {
 
     return {
       ...row,
+      warehouseLowStockThresholds:
+        warehouseResolution.resolved.length > 0 ? warehouseResolution.resolved : undefined,
       category: matchedProduct ? "matched" : "new",
       brandCategory,
       brandExists,
@@ -411,6 +646,7 @@ function productPayloadFromRow(row: ParsedProductImportRow, brandId: string) {
     stockUnit: per > 1 ? row.stockUnit || "carton" : baseUnit,
     unitsPerStockUnit: per,
     lowStockThreshold: row.lowStockThreshold,
+    totalLowStockThreshold: row.totalLowStockThreshold,
     isActive: true,
   };
 }
@@ -425,6 +661,8 @@ function resultRowFromInput(row: ProductImportConfirmInput["rows"][number]) {
     baseUnit: row.baseUnit,
     unitsPerStockUnit: row.unitsPerStockUnit,
     lowStockThreshold: row.lowStockThreshold,
+    totalLowStockThreshold: row.totalLowStockThreshold,
+    warehouseLowStockThresholds: row.warehouseLowStockThresholds,
     brandAction: row.brandAction,
     mergeTargetBrandId: row.mergeTargetBrandId,
     mergeTargetProductId: row.mergeTargetProductId,
@@ -435,16 +673,7 @@ export async function confirmProductImport(
   input: ProductImportConfirmInput,
   user: AuthUser
 ) {
-  if (!Types.ObjectId.isValid(input.warehouseId)) {
-    throw new BadRequestError("Invalid warehouse ID");
-  }
-  const warehouse = await Warehouse.findOne({
-    _id: input.warehouseId,
-    isActive: true,
-  }).lean();
-  if (!warehouse) {
-    throw new NotFoundError("Warehouse not found or inactive");
-  }
+  const warehouses = await Warehouse.find({ isActive: true }).select("name code").lean();
 
   const { brands, products, allProducts } = await loadImportContext();
   const results: ProductImportResultRow[] = [];
@@ -462,6 +691,8 @@ export async function confirmProductImport(
       baseUnit: row.baseUnit,
       unitsPerStockUnit: row.unitsPerStockUnit,
       lowStockThreshold: row.lowStockThreshold,
+      totalLowStockThreshold: row.totalLowStockThreshold,
+      warehouseLowStockThresholds: row.warehouseLowStockThresholds,
       stockUnit: row.unitsPerStockUnit > 1 ? "carton" : row.baseUnit,
     };
 
@@ -544,9 +775,15 @@ export async function confirmProductImport(
           stockUnit: payload.stockUnit,
           unitsPerStockUnit: payload.unitsPerStockUnit,
           lowStockThreshold: payload.lowStockThreshold ?? null,
+          totalLowStockThreshold: payload.totalLowStockThreshold ?? null,
           secondaryName: nextSecondary,
           ...(wasInactive ? { isActive: true } : {}),
         });
+        await finalizeImportedProduct(
+          String(targetProduct._id),
+          parsed.warehouseLowStockThresholds,
+          user
+        );
 
         if (wasInactive) {
           const idx = allProducts.findIndex(
@@ -570,6 +807,7 @@ export async function confirmProductImport(
       }
 
       const created = await createProduct(productPayloadFromRow(parsed, brandId));
+      await finalizeImportedProduct(created.id, parsed.warehouseLowStockThresholds, user);
       const fresh = await Product.findById(created.id).lean();
       if (fresh) products.push(fresh);
 
@@ -596,10 +834,12 @@ export async function confirmProductImport(
     userId: user.id,
     metadata: {
       fileName: input.fileName,
-      warehouseId: input.warehouseId,
-      warehouseName: warehouse.name,
-      warehouseCode: warehouse.code,
-      warehouseRole: "Audit trail only; product catalog imports do not create stock.",
+      warehouses: warehouses.map((wh) => ({
+        id: String(wh._id),
+        name: wh.name,
+        code: wh.code,
+      })),
+      listedInAllWarehouses: true,
       totalRows: input.rows.length,
       successCount,
       failedCount,
@@ -608,11 +848,11 @@ export async function confirmProductImport(
 
   return {
     fileName: input.fileName,
-    warehouse: {
-      id: String(warehouse._id),
-      name: warehouse.name,
-      code: warehouse.code,
-    },
+    warehouses: warehouses.map((wh) => ({
+      id: String(wh._id),
+      name: wh.name,
+      code: wh.code,
+    })),
     totalRows: input.rows.length,
     successCount,
     failedCount,

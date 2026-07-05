@@ -91,4 +91,44 @@ describe("buildLowStockTotals", () => {
     assert.equal(totals[0]?.totalLowStockThreshold, 50);
     assert.equal(totals[0]?.totalQuantity, 30);
   });
+
+  it("uses explicit product total threshold instead of summing warehouses", () => {
+    const totals = buildLowStockTotals([
+      row({
+        productId: "p1",
+        quantity: 40,
+        lowStockThreshold: 10,
+        productTotalLowStockThreshold: 50,
+      }),
+      row({
+        productId: "p1",
+        quantity: 5,
+        lowStockThreshold: 30,
+        productTotalLowStockThreshold: 50,
+      }),
+    ]);
+
+    assert.equal(totals.length, 1);
+    assert.equal(totals[0]?.totalQuantity, 45);
+    assert.equal(totals[0]?.totalLowStockThreshold, 50);
+  });
+
+  it("does not flag total low stock when quantity exceeds explicit product total", () => {
+    const totals = buildLowStockTotals([
+      row({
+        productId: "p1",
+        quantity: 40,
+        lowStockThreshold: 10,
+        productTotalLowStockThreshold: 50,
+      }),
+      row({
+        productId: "p1",
+        quantity: 20,
+        lowStockThreshold: 30,
+        productTotalLowStockThreshold: 50,
+      }),
+    ]);
+
+    assert.equal(totals.length, 0);
+  });
 });

@@ -28,6 +28,7 @@ type ProductDoc = {
   stockUnit?: string;
   unitsPerStockUnit?: number;
   lowStockThreshold?: number;
+  totalLowStockThreshold?: number;
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -50,6 +51,7 @@ export function toPublicProduct(doc: ProductDoc) {
     stockUnit: doc.stockUnit ?? "unit",
     unitsPerStockUnit: doc.unitsPerStockUnit ?? 1,
     lowStockThreshold: doc.lowStockThreshold,
+    totalLowStockThreshold: doc.totalLowStockThreshold,
     isActive: doc.isActive,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -200,6 +202,7 @@ export async function createProduct(input: CreateProductInput) {
       stockUnit: input.stockUnit ?? "unit",
       unitsPerStockUnit: input.unitsPerStockUnit ?? 1,
       lowStockThreshold: input.lowStockThreshold,
+      totalLowStockThreshold: input.totalLowStockThreshold,
       isActive: input.isActive ?? true,
     });
 
@@ -258,6 +261,11 @@ export async function updateProduct(id: string, input: UpdateProductInput) {
   if (input.lowStockThreshold !== undefined) {
     product.lowStockThreshold =
       input.lowStockThreshold === null ? undefined : input.lowStockThreshold;
+  }
+
+  if (input.totalLowStockThreshold !== undefined) {
+    product.totalLowStockThreshold =
+      input.totalLowStockThreshold === null ? undefined : input.totalLowStockThreshold;
   }
 
   if (input.isActive !== undefined) {

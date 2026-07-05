@@ -27,6 +27,7 @@ export const createProductSchema = z.object({
     .optional()
     .default(1),
   lowStockThreshold: z.coerce.number().int().min(0).optional(),
+  totalLowStockThreshold: z.coerce.number().int().min(0).optional(),
   isActive: z.boolean().optional().default(true),
 });
 
@@ -38,6 +39,7 @@ export const updateProductSchema = z.object({
   stockUnit: z.string().min(1).max(50).optional(),
   unitsPerStockUnit: z.coerce.number().int().min(1).optional(),
   lowStockThreshold: z.coerce.number().int().min(0).nullable().optional(),
+  totalLowStockThreshold: z.coerce.number().int().min(0).nullable().optional(),
   isActive: z.boolean().optional(),
 });
 

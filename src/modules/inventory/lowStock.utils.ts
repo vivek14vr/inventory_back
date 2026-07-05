@@ -9,6 +9,8 @@ export type LowStockStockRow = {
   unitsPerStockUnit: number;
   baseUnit: string;
   lowStockThreshold?: number;
+  /** When set on the product, used for combined low-stock instead of summing warehouse thresholds. */
+  productTotalLowStockThreshold?: number;
 };
 
 export type LowStockTotalRow = {
@@ -41,7 +43,10 @@ export function isWarehouseLowStock(row: LowStockStockRow): boolean {
 }
 
 export function buildLowStockTotals(rows: LowStockStockRow[]): LowStockTotalRow[] {
-  const byProduct = new Map<string, LowStockTotalRow>();
+  const byProduct = new Map<
+    string,
+    LowStockTotalRow & { summedThreshold: number; explicitTotal?: number }
+  >();
 
   for (const r of rows) {
     if (r.quantity <= 0) continue;
@@ -58,22 +63,39 @@ export function buildLowStockTotals(rows: LowStockStockRow[]): LowStockTotalRow[
         unitsPerStockUnit: r.unitsPerStockUnit,
         baseUnit: r.baseUnit,
         totalQuantity: r.quantity,
-        totalLowStockThreshold:
-          r.lowStockThreshold != null ? r.lowStockThreshold : 0,
+        totalLowStockThreshold: 0,
+        summedThreshold: r.lowStockThreshold != null ? r.lowStockThreshold : 0,
+        explicitTotal: r.productTotalLowStockThreshold,
       });
       continue;
     }
 
     existing.totalQuantity += r.quantity;
     if (r.lowStockThreshold != null) {
-      existing.totalLowStockThreshold += r.lowStockThreshold;
+      existing.summedThreshold += r.lowStockThreshold;
+    }
+    if (r.productTotalLowStockThreshold != null) {
+      existing.explicitTotal = r.productTotalLowStockThreshold;
     }
   }
 
-  return Array.from(byProduct.values()).filter(
-    (row) =>
-      row.totalLowStockThreshold > 0 &&
-      row.totalQuantity > 0 &&
-      row.totalQuantity <= row.totalLowStockThreshold
-  );
+  return Array.from(byProduct.values())
+    .map((row) => ({
+      productId: row.productId,
+      productName: row.productName,
+      secondaryProductName: row.secondaryProductName,
+      brandId: row.brandId,
+      brandName: row.brandName,
+      stockUnit: row.stockUnit,
+      unitsPerStockUnit: row.unitsPerStockUnit,
+      baseUnit: row.baseUnit,
+      totalQuantity: row.totalQuantity,
+      totalLowStockThreshold: row.explicitTotal ?? row.summedThreshold,
+    }))
+    .filter(
+      (row) =>
+        row.totalLowStockThreshold > 0 &&
+        row.totalQuantity > 0 &&
+        row.totalQuantity <= row.totalLowStockThreshold
+    );
 }

@@ -63,18 +63,14 @@ export type StockRow = {
   warehouseLowStockThreshold?: number;
   /** Product-wide fallback threshold (base units). */
   productLowStockThreshold?: number;
+  /** Combined low-stock threshold across all warehouses (base units). */
+  productTotalLowStockThreshold?: number;
   updatedAt: Date;
 };
 
 async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
   const filter: Record<string, unknown> = {};
 
-  if (!query.includeZero) {
-    filter.$or = [
-      { quantity: { $gt: 0 } },
-      { lowStockThreshold: { $exists: true, $ne: null } },
-    ];
-  }
   if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
     filter.warehouseId = query.warehouseId;
   }
@@ -86,7 +82,7 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
     )
     .populate<{ productId: { _id: Types.ObjectId; name: string; secondaryName?: string; lowStockThreshold?: number; stockUnit?: string; unitsPerStockUnit?: number; isActive?: boolean; brandId: Types.ObjectId } }>({
       path: "productId",
-      select: "name secondaryName lowStockThreshold stockUnit unitsPerStockUnit baseUnit isActive brandId",
+      select: "name secondaryName lowStockThreshold totalLowStockThreshold stockUnit unitsPerStockUnit baseUnit isActive brandId",
       populate: { path: "brandId", select: "name isActive" },
     })
     .sort({ updatedAt: -1 })
@@ -103,6 +99,7 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
       name: string;
       secondaryName?: string;
       lowStockThreshold?: number;
+      totalLowStockThreshold?: number;
       stockUnit?: string;
       unitsPerStockUnit?: number;
       baseUnit?: string;
@@ -141,6 +138,7 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
       lowStockThreshold: effectiveThreshold,
       warehouseLowStockThreshold: balanceThreshold,
       productLowStockThreshold: product.lowStockThreshold,
+      productTotalLowStockThreshold: product.totalLowStockThreshold,
       updatedAt: b.updatedAt,
     });
   }
@@ -186,6 +184,7 @@ export type StockProductRow = {
   totalQuantity: number;
   totalLowStockThreshold: number;
   productLowStockThreshold?: number;
+  productTotalLowStockThreshold?: number;
 };
 
 function groupStockByProduct(rows: StockRow[]): StockProductRow[] {
@@ -208,6 +207,7 @@ function groupStockByProduct(rows: StockRow[]): StockProductRow[] {
         totalQuantity: 0,
         totalLowStockThreshold: 0,
         productLowStockThreshold: r.productLowStockThreshold,
+        productTotalLowStockThreshold: r.productTotalLowStockThreshold,
       });
     }
     const entry = map.get(r.productId)!;
@@ -392,6 +392,7 @@ export async function listCurrentStock(query: StockQuery) {
       lowStockThreshold: loc.lowStockThreshold,
       warehouseLowStockThreshold: loc.warehouseLowStockThreshold,
       productLowStockThreshold: p.productLowStockThreshold,
+      productTotalLowStockThreshold: p.productTotalLowStockThreshold,
       updatedAt: loc.updatedAt,
     }))
   );
@@ -1060,6 +1061,38 @@ export async function adjustStockBalance(input: AdjustStockInput, user: AuthUser
       changed: delta !== 0,
     };
   });
+}
+
+export async function ensureProductBalancesForAllWarehouses(productId: string) {
+  if (!Types.ObjectId.isValid(productId)) {
+    throw new BadRequestError("Invalid product");
+  }
+
+  const product = await Product.findById(productId).lean();
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+
+  const [warehouses, existingBalances] = await Promise.all([
+    Warehouse.find({ isActive: true }).select("_id").lean(),
+    InventoryBalance.find({ productId }).select("warehouseId").lean(),
+  ]);
+
+  const existingWarehouseIds = new Set(
+    existingBalances.map((balance) => String(balance.warehouseId))
+  );
+
+  const missing = warehouses
+    .filter((warehouse) => !existingWarehouseIds.has(String(warehouse._id)))
+    .map((warehouse) => ({
+      warehouseId: warehouse._id,
+      productId,
+      quantity: 0,
+    }));
+
+  if (missing.length > 0) {
+    await InventoryBalance.insertMany(missing);
+  }
 }
 
 export async function updateLowStockThreshold(

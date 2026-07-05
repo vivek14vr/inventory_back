@@ -14,6 +14,8 @@ export interface IProduct extends Document {
   unitsPerStockUnit: number;
   /** Default low-stock alert per warehouse when no warehouse-specific threshold is set. */
   lowStockThreshold?: number;
+  /** Combined low-stock alert when total quantity across all warehouses is at or below this level. */
+  totalLowStockThreshold?: number;
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -29,6 +31,7 @@ const productSchema = new Schema<IProduct>(
     stockUnit: { type: String, trim: true, default: "unit" },
     unitsPerStockUnit: { type: Number, min: 1, default: 1 },
     lowStockThreshold: { type: Number, min: 0 },
+    totalLowStockThreshold: { type: Number, min: 0 },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
