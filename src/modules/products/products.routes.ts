@@ -9,11 +9,13 @@ import {
 import { hasPermission, isAdmin } from "../../shared/utils/permissions.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
+import * as inventoryAdminService from "../inventory/inventory.service.js";
 import * as productsService from "./products.service.js";
 import {
   createProductSchema,
   listProductsQuerySchema,
   updateProductSchema,
+  updateProductWarehouseThresholdsSchema,
 } from "./products.validation.js";
 
 const router = Router();
@@ -48,6 +50,36 @@ router.get(
     }
     const { items, pagination } = await productsService.listProducts(parsed.data);
     sendSuccess(res, items, 200, { pagination });
+  })
+);
+
+router.get(
+  "/:id/warehouse-thresholds",
+  authenticate,
+  requireAdminOrPermission(Permission.PRODUCTS_MANAGE),
+  asyncHandler(async (req, res) => {
+    const rows = await inventoryAdminService.listProductWarehouseThresholds(
+      String(req.params.id)
+    );
+    sendSuccess(res, rows);
+  })
+);
+
+router.put(
+  "/:id/warehouse-thresholds",
+  authenticate,
+  requireAdminOrPermission(Permission.PRODUCTS_MANAGE),
+  asyncHandler(async (req, res) => {
+    const parsed = updateProductWarehouseThresholdsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
+    }
+    const rows = await inventoryAdminService.updateProductWarehouseThresholds(
+      String(req.params.id),
+      parsed.data.thresholds,
+      req.user!
+    );
+    sendSuccess(res, rows);
   })
 );
 

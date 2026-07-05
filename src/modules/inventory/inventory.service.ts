@@ -1063,7 +1063,7 @@ export async function updateLowStockThreshold(
     throw new BadRequestError("Invalid warehouse or product");
   }
 
-  const [warehouse, product, balance] = await Promise.all([
+  const [warehouse, product, existingBalance] = await Promise.all([
     Warehouse.findOne({ _id: input.warehouseId, isActive: true }).lean(),
     Product.findById(input.productId).lean(),
     InventoryBalance.findOne({
@@ -1078,16 +1078,26 @@ export async function updateLowStockThreshold(
   if (!product) {
     throw new NotFoundError("Product not found");
   }
-  if (!balance) {
-    throw new NotFoundError("No stock record for this product at this warehouse");
-  }
 
-  if (input.lowStockThreshold === null) {
-    balance.lowStockThreshold = undefined;
+  let balance = existingBalance;
+  if (!balance) {
+    if (input.lowStockThreshold === null) {
+      throw new NotFoundError("No stock record for this product at this warehouse");
+    }
+    balance = await InventoryBalance.create({
+      warehouseId: input.warehouseId,
+      productId: input.productId,
+      quantity: 0,
+      lowStockThreshold: input.lowStockThreshold,
+    });
   } else {
-    balance.lowStockThreshold = input.lowStockThreshold;
+    if (input.lowStockThreshold === null) {
+      balance.lowStockThreshold = undefined;
+    } else {
+      balance.lowStockThreshold = input.lowStockThreshold;
+    }
+    await balance.save();
   }
-  await balance.save();
 
   const effectiveThreshold = resolveLowStockThreshold(
     balance.lowStockThreshold,
@@ -1117,6 +1127,81 @@ export async function updateLowStockThreshold(
     productLowStockThreshold: product.lowStockThreshold ?? null,
     lowStockThreshold: effectiveThreshold ?? null,
   };
+}
+
+export type ProductWarehouseThresholdRow = {
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  quantity: number;
+  warehouseLowStockThreshold: number | null;
+  effectiveLowStockThreshold: number | null;
+};
+
+export async function listProductWarehouseThresholds(
+  productId: string
+): Promise<ProductWarehouseThresholdRow[]> {
+  if (!Types.ObjectId.isValid(productId)) {
+    throw new BadRequestError("Invalid product");
+  }
+
+  const product = await Product.findById(productId).lean();
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+
+  const [warehouses, balances] = await Promise.all([
+    Warehouse.find({ isActive: true }).sort({ name: 1 }).lean(),
+    InventoryBalance.find({ productId }).lean(),
+  ]);
+
+  const balanceByWarehouse = new Map(
+    balances.map((b) => [String(b.warehouseId), b])
+  );
+
+  return warehouses.map((wh) => {
+    const balance = balanceByWarehouse.get(String(wh._id));
+    const warehouseThreshold = balance?.lowStockThreshold;
+    return {
+      warehouseId: String(wh._id),
+      warehouseName: wh.name,
+      warehouseCode: wh.code,
+      quantity: balance?.quantity ?? 0,
+      warehouseLowStockThreshold: warehouseThreshold ?? null,
+      effectiveLowStockThreshold:
+        resolveLowStockThreshold(warehouseThreshold, product.lowStockThreshold) ??
+        null,
+    };
+  });
+}
+
+export async function updateProductWarehouseThresholds(
+  productId: string,
+  thresholds: Array<{ warehouseId: string; lowStockThreshold: number | null }>,
+  user: AuthUser
+) {
+  if (!Types.ObjectId.isValid(productId)) {
+    throw new BadRequestError("Invalid product");
+  }
+
+  const product = await Product.findById(productId).lean();
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+
+  const results = [];
+  for (const row of thresholds) {
+    const result = await updateLowStockThreshold(
+      {
+        warehouseId: row.warehouseId,
+        productId,
+        lowStockThreshold: row.lowStockThreshold,
+      },
+      user
+    );
+    results.push(result);
+  }
+  return results;
 }
 
 export async function listInvoiceMovements(query: InvoiceListQuery) {
