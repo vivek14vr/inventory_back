@@ -17,6 +17,7 @@ import { buildStockMovementAuditMetadata } from "../../shared/utils/auditMetadat
 import { hasPermission, isAdmin, getWarehouseIdsForPermission } from "../../shared/utils/permissions.js";
 import { resolveWarehouseIdForAnyPermission } from "../../shared/utils/permissions.js";
 import { paginateArray } from "../../shared/pagination/pagination.js";
+import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import {
   saleQuantityInventoryDelta,
   sumReturnedQuantityForSale,
@@ -215,7 +216,7 @@ async function findSaleMovements(
   const filter: Record<string, unknown> = {
     type: StockMovementType.STOCK_OUT,
     dispatchType: DispatchType.DIRECT_SELLING,
-    invoiceNumber,
+    invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
   };
 
   if (clientName) {

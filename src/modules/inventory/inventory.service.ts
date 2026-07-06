@@ -15,6 +15,7 @@ import {
   saleQuantityInventoryDelta,
   sumReturnedQuantityForSale,
 } from "../stock/saleReturn.utils.js";
+import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import {
   DispatchType,
   StockMovementType,
@@ -31,7 +32,6 @@ import {
 import type {
   AdjustStockInput,
   InvoiceListQuery,
-  InvoiceLookupQuery,
   LowStockQuery,
   MovementsQuery,
   StockFilters,
@@ -1598,10 +1598,7 @@ export async function listInvoiceGroups(query: InvoiceListQuery) {
   return { items, pagination };
 }
 
-export async function searchMovementsForInvoiceFix(query: InvoiceLookupQuery) {
-  if (!query.search?.trim()) {
-    return listInvoiceMovements(query);
-  }
+export async function searchMovementsForInvoiceFix(query: InvoiceListQuery) {
   return listInvoiceMovements(query);
 }
 
@@ -1706,6 +1703,39 @@ export async function updateMovementInvoice(
     if (clientChanged) {
       movement.clientName = nextClient || undefined;
     }
+
+    if (invoiceChanged || clientChanged) {
+      const returnSyncFilter: Record<string, unknown> = {
+        type: StockMovementType.STOCK_IN,
+        $or: [
+          { relatedSaleMovementId: movement._id },
+          {
+            relatedSaleMovementId: { $exists: false },
+            productId: movement.productId,
+            warehouseId: movement.warehouseId,
+            ...(previousInvoice
+              ? { invoiceNumber: exactCaseInsensitiveRegex(previousInvoice) }
+              : {}),
+            ...(previousClient
+              ? { clientName: exactCaseInsensitiveRegex(previousClient) }
+              : {}),
+          },
+        ],
+      };
+
+      const returnSyncUpdate: Record<string, unknown> = {};
+      if (invoiceChanged) {
+        returnSyncUpdate.invoiceNumber = nextInvoice || undefined;
+      }
+      if (clientChanged) {
+        returnSyncUpdate.clientName = nextClient || undefined;
+      }
+
+      await StockMovement.updateMany(returnSyncFilter, {
+        $set: returnSyncUpdate,
+      }).session(session ?? null);
+    }
+
     if (markingWorked) {
       const workedFilter: Record<string, unknown> = {
         invoiceLastWorkedAt: { $exists: true },

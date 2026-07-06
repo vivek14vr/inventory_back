@@ -18,6 +18,7 @@ import {
 import {
   resolveLowStockThresholdWithDefault,
 } from "../../shared/constants/lowStockDefaults.js";
+import { runInTransaction } from "../../shared/utils/mongoTransaction.js";
 import type { ProductImportConfirmInput } from "./imports.validation.js";
 
 export type WarehouseLowStockImportEntry = {
@@ -762,6 +763,19 @@ export async function confirmProductImport(
       continue;
     }
 
+    if (
+      row.action === "merge" &&
+      (!row.mergeTargetProductId || !Types.ObjectId.isValid(row.mergeTargetProductId))
+    ) {
+      results.push({
+        ...base,
+        status: "FAILED",
+        message: "Select a product to merge into",
+      });
+      failedCount++;
+      continue;
+    }
+
     try {
       const brand = await resolveBrandForRow(
         {
@@ -774,6 +788,7 @@ export async function confirmProductImport(
       );
       const brandId = String(brand._id);
 
+      const rowResult = await runInTransaction(async () => {
       if (row.action === "merge") {
         const targetId = row.mergeTargetProductId;
         let targetProduct =
@@ -789,14 +804,9 @@ export async function confirmProductImport(
         }
 
         if (targetProduct && String(targetProduct.brandId) !== brandId) {
-          results.push({
-            ...base,
-            status: "FAILED",
-            message:
-              "Selected product belongs to a different brand. Pick a product under the chosen brand.",
-          });
-          failedCount++;
-          continue;
+          throw new BadRequestError(
+            "Selected product belongs to a different brand. Pick a product under the chosen brand."
+          );
         }
 
         if (!targetProduct) {
@@ -810,13 +820,7 @@ export async function confirmProductImport(
         }
 
         if (!targetProduct) {
-          results.push({
-            ...base,
-            status: "FAILED",
-            message: "No matching product found to merge into",
-          });
-          failedCount++;
-          continue;
+          throw new BadRequestError("No matching product found to merge into");
         }
 
         const wasInactive = targetProduct.isActive === false;
@@ -839,37 +843,44 @@ export async function confirmProductImport(
         });
         await finalizeImportedProduct(String(targetProduct._id), parsed, user);
 
-        if (wasInactive) {
-          const idx = allProducts.findIndex(
-            (product) => String(product._id) === String(targetProduct!._id)
-          );
-          if (idx >= 0) {
-            allProducts[idx] = { ...allProducts[idx], isActive: true };
-          }
-        }
-
-        results.push({
-          ...base,
-          status: "SUCCESS",
+        return {
+          status: "SUCCESS" as const,
           message: wasInactive
             ? `Reactivated and merged into "${targetProduct.name}"`
             : `Merged into "${targetProduct.name}"`,
           productId: String(targetProduct._id),
-        });
-        successCount++;
-        continue;
+          wasInactive,
+          targetProductId: String(targetProduct._id),
+        };
       }
 
       const created = await createProduct(productPayloadFromRow(parsed, brandId));
       await finalizeImportedProduct(created.id, parsed, user, { resetStock: true });
-      const fresh = await Product.findById(created.id).lean();
-      if (fresh) products.push(fresh);
+      return {
+        status: "SUCCESS" as const,
+        message: "Created new product",
+        productId: created.id,
+        createdProduct: await Product.findById(created.id).lean(),
+      };
+      });
+
+      if (rowResult.createdProduct) {
+        products.push(rowResult.createdProduct);
+      }
+      if (rowResult.wasInactive && rowResult.targetProductId) {
+        const idx = allProducts.findIndex(
+          (product) => String(product._id) === rowResult.targetProductId
+        );
+        if (idx >= 0) {
+          allProducts[idx] = { ...allProducts[idx], isActive: true };
+        }
+      }
 
       results.push({
         ...base,
-        status: "SUCCESS",
-        message: "Created new product",
-        productId: created.id,
+        status: rowResult.status,
+        message: rowResult.message,
+        productId: rowResult.productId,
       });
       successCount++;
     } catch (err) {

@@ -6,6 +6,7 @@ import { Product } from "../../models/Product.js";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
+import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
@@ -340,11 +341,12 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
     if (isSummaryLabel(productName)) continue;
 
     if (!productName) continue;
+    if (quantity == null || quantity < 1) continue;
 
     current.lines.push({
       rowNumber: excelRowNumber,
       productName,
-      quantity: quantity ?? 0,
+      quantity,
     });
   }
 
@@ -549,6 +551,15 @@ function mergeBatchItems(
   return Array.from(merged.values());
 }
 
+async function deactivateImportedProducts(productIds: string[]): Promise<void> {
+  const ids = productIds.filter((id) => Types.ObjectId.isValid(id));
+  if (ids.length === 0) return;
+  await Product.updateMany(
+    { _id: { $in: ids.map((id) => new Types.ObjectId(id)) } },
+    { $set: { isActive: false } }
+  );
+}
+
 export async function confirmSalesImport(input: SalesImportConfirmInput, user: AuthUser) {
   const warehouseId = input.warehouseId.trim();
   if (!Types.ObjectId.isValid(warehouseId)) {
@@ -585,6 +596,22 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     if (voucher.lines.length === 0) voucherErrors.push("No product lines to import");
 
     const batchItems: Array<{ productId: string; brandId: string; quantity: number }> = [];
+    const pendingLines: Array<{
+      baseLine: {
+        rowNumber: number;
+        voucherIndex: number;
+        headerRowNumber: number;
+        clientName: string;
+        invoiceNumber: string;
+        sellDate: string;
+        productName: string;
+        quantity: number;
+        action: "merge" | "create";
+        mergeTargetProductId?: string;
+        createBrandId?: string;
+      };
+      line: (typeof voucher.lines)[number];
+    }> = [];
     let voucherFailedLines = 0;
 
     for (const line of voucher.lines) {
@@ -621,62 +648,22 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         continue;
       }
 
-      let resolvedProduct: { productId: string; brandId: string; created: boolean };
-      try {
-        resolvedProduct = await resolveSalesImportLineProduct(
-          line,
-          createdProductCache,
-          productById
-        );
-        if (resolvedProduct.created) {
-          createdProductCount++;
-          await AuditLog.create({
-            action: "PRODUCT_CREATED",
-            entity: "Product",
-            entityId: resolvedProduct.productId,
-            userId: user.id,
-            metadata: {
-              name: baseLine.productName,
-              brandId: resolvedProduct.brandId,
-              source: "sales_import",
-            },
-          });
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Could not resolve product";
-        lineResults.push({
-          ...baseLine,
-          status: "FAILED",
-          message,
-        });
-        failedCount++;
-        voucherFailedLines++;
-        continue;
-      }
-
-      batchItems.push({
-        productId: resolvedProduct.productId,
-        brandId: resolvedProduct.brandId,
-        quantity: baseLine.quantity,
-      });
+      pendingLines.push({ baseLine, line });
 
       lineResults.push({
         ...baseLine,
-        productCreated: resolvedProduct.created,
         status: "SKIPPED",
-        message: resolvedProduct.created
-          ? "Pending voucher import (new product created)"
-          : "Pending voucher import",
+        message: "Pending voucher import",
       });
     }
 
-    if (voucherErrors.length > 0 || batchItems.length === 0) {
+    if (voucherErrors.length > 0 || pendingLines.length === 0) {
       voucherResults.push({
         ...baseVoucher,
         status: "FAILED",
         message:
           voucherErrors.join("; ") ||
-          (batchItems.length === 0 ? "No valid product lines for this invoice" : undefined),
+          (pendingLines.length === 0 ? "No valid product lines for this invoice" : undefined),
       });
       continue;
     }
@@ -685,8 +672,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       type: StockMovementType.STOCK_OUT,
       dispatchType: DispatchType.DIRECT_SELLING,
       warehouseId: new Types.ObjectId(warehouseId),
-      invoiceNumber: baseVoucher.invoiceNumber,
-      clientName: baseVoucher.clientName,
+      invoiceNumber: exactCaseInsensitiveRegex(baseVoucher.invoiceNumber),
+      clientName: exactCaseInsensitiveRegex(baseVoucher.clientName),
     });
     if (duplicateInvoice) {
       voucherResults.push({
@@ -707,14 +694,56 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       continue;
     }
 
-    const mergedItems = mergeBatchItems(batchItems);
     const notes = baseVoucher.sellDate
       ? `Sales import${input.fileName ? `: ${input.fileName}` : ""} (${baseVoucher.sellDate})`
       : input.fileName
         ? `Sales import: ${input.fileName}`
         : "Sales import";
 
+    const voucherCreatedProductIds: string[] = [];
+
     try {
+      for (const { baseLine, line } of pendingLines) {
+        const resolvedProduct = await resolveSalesImportLineProduct(
+          line,
+          createdProductCache,
+          productById
+        );
+        if (resolvedProduct.created) {
+          createdProductCount++;
+          voucherCreatedProductIds.push(resolvedProduct.productId);
+          await AuditLog.create({
+            action: "PRODUCT_CREATED",
+            entity: "Product",
+            entityId: resolvedProduct.productId,
+            userId: user.id,
+            metadata: {
+              name: baseLine.productName,
+              brandId: resolvedProduct.brandId,
+              source: "sales_import",
+            },
+          });
+        }
+
+        batchItems.push({
+          productId: resolvedProduct.productId,
+          brandId: resolvedProduct.brandId,
+          quantity: baseLine.quantity,
+        });
+
+        const pendingResult = lineResults.find(
+          (row) =>
+            row.voucherIndex === baseVoucher.voucherIndex &&
+            row.rowNumber === baseLine.rowNumber &&
+            row.status === "SKIPPED"
+        );
+        if (pendingResult) {
+          pendingResult.productCreated = resolvedProduct.created;
+        }
+      }
+
+      const mergedItems = mergeBatchItems(batchItems);
+
       const batchResult = await stockService.stockOutBatch(
         {
           warehouseId,
@@ -753,6 +782,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
             : undefined,
       });
     } catch (err) {
+      await deactivateImportedProducts(voucherCreatedProductIds);
       const message = err instanceof Error ? err.message : "Stock out failed";
       for (const lineResult of lineResults) {
         if (

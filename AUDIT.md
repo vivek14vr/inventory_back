@@ -402,3 +402,4 @@
 |------|--------|-------|
 | 2026-07-06 | System scan | Initial audit — 40 findings |
 | 2026-07-06 | Remediation | Fixed AUDIT-001–015, 019, 027 (partial); see git history |
+| 2026-07-06 | Remediation | Fixed AUDIT-017–020, 023–026, 028–035, 038–039; see git history |
