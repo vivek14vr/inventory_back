@@ -18,7 +18,8 @@ export async function adjustBalance(
   warehouseId: string,
   productId: string,
   delta: number,
-  session?: mongoose.ClientSession | null
+  session?: mongoose.ClientSession | null,
+  options?: { allowNegative?: boolean }
 ): Promise<number> {
   if (delta === 0) {
     return getBalance(warehouseId, productId, session);
@@ -29,11 +30,17 @@ export async function adjustBalance(
   // read-then-write check and overselling (important on standalone MongoDB
   // where multi-document transactions are unavailable).
   if (delta < 0) {
-    const updated = await InventoryBalance.findOneAndUpdate(
-      { warehouseId, productId, quantity: { $gte: -delta } },
-      { $inc: { quantity: delta } },
-      { new: true, ...(session ? { session } : {}) }
-    );
+    const updated = options?.allowNegative
+      ? await InventoryBalance.findOneAndUpdate(
+          { warehouseId, productId },
+          { $inc: { quantity: delta } },
+          { new: true, upsert: true, ...(session ? { session } : {}) }
+        )
+      : await InventoryBalance.findOneAndUpdate(
+          { warehouseId, productId, quantity: { $gte: -delta } },
+          { $inc: { quantity: delta } },
+          { new: true, ...(session ? { session } : {}) }
+        );
     if (!updated) {
       const current = await getBalance(warehouseId, productId, session);
       throw new BadRequestError(

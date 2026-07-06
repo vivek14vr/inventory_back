@@ -17,6 +17,10 @@ import { buildStockMovementAuditMetadata } from "../../shared/utils/auditMetadat
 import { hasPermission, isAdmin, getWarehouseIdsForPermission } from "../../shared/utils/permissions.js";
 import { resolveWarehouseIdForAnyPermission } from "../../shared/utils/permissions.js";
 import { paginateArray } from "../../shared/pagination/pagination.js";
+import {
+  saleQuantityInventoryDelta,
+  sumReturnedQuantityForSale,
+} from "./saleReturn.utils.js";
 import * as balanceService from "./inventory.service.js";
 import * as inventoryAdminService from "../inventory/inventory.service.js";
 import type {
@@ -162,58 +166,20 @@ function assertCanReturnAtWarehouse(user: AuthUser, warehouseId: string): void {
   throw new ForbiddenError("You do not have permission to process returns at this warehouse");
 }
 
-async function countSaleLinesForProductOnInvoice(
-  invoiceNumber: string,
-  clientName: string,
-  productId: Types.ObjectId
-): Promise<number> {
-  return StockMovement.countDocuments({
-    type: StockMovementType.STOCK_OUT,
-    dispatchType: DispatchType.DIRECT_SELLING,
-    invoiceNumber,
-    clientName,
-    productId,
-  });
-}
-
 async function sumReturnedQuantity(
   sale: SaleMovementDoc,
   session?: ClientSession | null
 ): Promise<number> {
-  const linked = await StockMovement.aggregate<{ total: number }>([
+  return sumReturnedQuantityForSale(
     {
-      $match: {
-        type: StockMovementType.STOCK_IN,
-        relatedSaleMovementId: sale._id,
-      },
-    },
-    { $group: { _id: null, total: { $sum: "$quantity" } } },
-  ]).session(session ?? null);
-
-  let total = linked[0]?.total ?? 0;
-
-  const saleLinesForProduct = await countSaleLinesForProductOnInvoice(
-    sale.invoiceNumber?.trim() ?? "",
-    sale.clientName?.trim() ?? "",
-    sale.productId
-  );
-
-  if (saleLinesForProduct === 1) {
-    const unlinked = await StockMovement.find({
-      type: StockMovementType.STOCK_IN,
-      relatedSaleMovementId: { $exists: false },
+      _id: sale._id,
       invoiceNumber: sale.invoiceNumber,
       clientName: sale.clientName,
       productId: sale.productId,
       warehouseId: sale.warehouseIdPop?._id ?? sale.warehouseId,
-    })
-      .session(session ?? null)
-      .lean();
-
-    total += unlinked.reduce((sum, row) => sum + row.quantity, 0);
-  }
-
-  return total;
+    },
+    session
+  );
 }
 
 async function mapSaleToLine(
@@ -399,6 +365,94 @@ export async function listClientReturnInvoices(
     linkedReturns.map((row) => [String(row._id), row.total])
   );
 
+  const saleLineCountByProductKey = new Map<string, number>();
+  const invoiceNumbers = new Set<string>();
+  for (const sale of sales) {
+    const invoiceNumber = sale.invoiceNumber?.trim() ?? "";
+    const clientName = sale.clientName?.trim() ?? "";
+    if (!invoiceNumber) continue;
+    invoiceNumbers.add(invoiceNumber);
+    const productKey = [
+      invoiceNumber.toLowerCase(),
+      clientName.toLowerCase(),
+      String(sale.productId),
+    ].join("|");
+    saleLineCountByProductKey.set(
+      productKey,
+      (saleLineCountByProductKey.get(productKey) ?? 0) + 1
+    );
+  }
+
+  const unlinkedByKey = new Map<string, number>();
+  if (invoiceNumbers.size > 0) {
+    const unlinkedReturns = await StockMovement.aggregate<{
+      _id: {
+        invoiceNumber: string;
+        clientName: string;
+        productId: Types.ObjectId;
+        warehouseId: Types.ObjectId;
+      };
+      total: number;
+    }>([
+      {
+        $match: {
+          type: StockMovementType.STOCK_IN,
+          relatedSaleMovementId: { $exists: false },
+          invoiceNumber: { $in: [...invoiceNumbers] },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            invoiceNumber: "$invoiceNumber",
+            clientName: "$clientName",
+            productId: "$productId",
+            warehouseId: "$warehouseId",
+          },
+          total: { $sum: "$quantity" },
+        },
+      },
+    ]);
+
+    for (const row of unlinkedReturns) {
+      const key = [
+        row._id.invoiceNumber?.trim().toLowerCase() ?? "",
+        row._id.clientName?.trim().toLowerCase() ?? "",
+        String(row._id.productId),
+        String(row._id.warehouseId),
+      ].join("|");
+      unlinkedByKey.set(key, row.total);
+    }
+  }
+
+  function returnedQuantityForSale(sale: (typeof sales)[number]): number {
+    let total = returnedBySaleId.get(String(sale._id)) ?? 0;
+    const invoiceNumber = sale.invoiceNumber?.trim() ?? "";
+    const clientName = sale.clientName?.trim() ?? "";
+    const productKey = [
+      invoiceNumber.toLowerCase(),
+      clientName.toLowerCase(),
+      String(sale.productId),
+    ].join("|");
+
+    if ((saleLineCountByProductKey.get(productKey) ?? 0) === 1) {
+      const warehouse = sale.warehouseId as unknown as { _id: Types.ObjectId } | Types.ObjectId;
+      const warehouseId =
+        typeof warehouse === "object" && warehouse && "_id" in warehouse
+          ? String(warehouse._id)
+          : String(warehouse);
+      const unlinkedKey = [
+        invoiceNumber.toLowerCase(),
+        clientName.toLowerCase(),
+        String(sale.productId),
+        warehouseId,
+      ].join("|");
+      total += unlinkedByKey.get(unlinkedKey) ?? 0;
+    }
+
+    return total;
+  }
+
   const groups = new Map<string, ClientReturnInvoiceSummary>();
 
   for (const sale of sales) {
@@ -415,7 +469,7 @@ export async function listClientReturnInvoices(
     assertCanReturnAtWarehouse(user, warehouseId);
 
     const key = buildClientReturnGroupKey(invoiceNumber, clientName, warehouseId);
-    const returnedQuantity = returnedBySaleId.get(String(sale._id)) ?? 0;
+    const returnedQuantity = returnedQuantityForSale(sale);
     const returnableQuantity = Math.max(sale.quantity - returnedQuantity, 0);
     const saleDate =
       sale.createdAt instanceof Date
@@ -598,6 +652,13 @@ export async function submitClientReturn(input: ClientReturnSubmitInput, user: A
 
     assertCanReturnAtWarehouse(user, warehouseId);
 
+    const returnedQuantity = await sumReturnedQuantity(sale);
+    if (input.quantity < returnedQuantity) {
+      throw new BadRequestError(
+        `Sold quantity cannot be below ${returnedQuantity} — that much has already been returned on this line`
+      );
+    }
+
     const balanceBefore = await balanceService.getBalance(warehouseId, productId);
 
     const row = await inventoryAdminService.updateMovementInvoice(
@@ -607,7 +668,11 @@ export async function submitClientReturn(input: ClientReturnSubmitInput, user: A
     );
 
     const balanceAfter = await balanceService.getBalance(warehouseId, productId);
-    const inventoryDelta = previousQuantity - input.quantity;
+    const inventoryDelta = saleQuantityInventoryDelta(
+      previousQuantity,
+      input.quantity,
+      returnedQuantity
+    );
 
     if (inventoryDelta > 0 && balanceAfter !== balanceBefore + inventoryDelta) {
       throw new BadRequestError(

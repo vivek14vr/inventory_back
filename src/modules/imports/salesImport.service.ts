@@ -3,7 +3,9 @@ import * as XLSX from "xlsx";
 import { AuditLog } from "../../models/AuditLog.js";
 import { Brand } from "../../models/Brand.js";
 import { Product } from "../../models/Product.js";
+import { StockMovement } from "../../models/StockMovement.js";
 import { Warehouse } from "../../models/Warehouse.js";
+import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
@@ -676,6 +678,32 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
           voucherErrors.join("; ") ||
           (batchItems.length === 0 ? "No valid product lines for this invoice" : undefined),
       });
+      continue;
+    }
+
+    const duplicateInvoice = await StockMovement.exists({
+      type: StockMovementType.STOCK_OUT,
+      dispatchType: DispatchType.DIRECT_SELLING,
+      warehouseId: new Types.ObjectId(warehouseId),
+      invoiceNumber: baseVoucher.invoiceNumber,
+      clientName: baseVoucher.clientName,
+    });
+    if (duplicateInvoice) {
+      voucherResults.push({
+        ...baseVoucher,
+        status: "FAILED",
+        message: `Invoice ${baseVoucher.invoiceNumber} for ${baseVoucher.clientName} was already imported at this warehouse`,
+      });
+      for (const lineResult of lineResults) {
+        if (
+          lineResult.voucherIndex === baseVoucher.voucherIndex &&
+          lineResult.status === "SKIPPED"
+        ) {
+          lineResult.status = "FAILED";
+          lineResult.message = "Duplicate invoice — skipped";
+          failedCount++;
+        }
+      }
       continue;
     }
 

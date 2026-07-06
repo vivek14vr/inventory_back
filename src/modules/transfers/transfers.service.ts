@@ -154,22 +154,23 @@ async function transferAuditSnapshot(
 
 export async function listPendingTransfers(
   user: AuthUser,
-  destinationWarehouseId?: string
+  warehouseId?: string
 ) {
   const filter: Record<string, unknown> = { status: TransferStatus.PENDING };
 
   if (isAdmin(user)) {
-    if (
-      destinationWarehouseId &&
-      Types.ObjectId.isValid(destinationWarehouseId)
-    ) {
-      filter.destinationWarehouseId = destinationWarehouseId;
+    if (warehouseId && Types.ObjectId.isValid(warehouseId)) {
+      filter.$or = [
+        { destinationWarehouseId: warehouseId },
+        { sourceWarehouseId: warehouseId },
+      ];
     }
   } else {
     const allowed = [
       ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_VIEW),
       ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_RECEIVE),
       ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_MANAGE),
+      ...getWarehouseIdsForPermission(user, Permission.RETURNS_WAREHOUSE),
     ];
     const unique = [...new Set(allowed)];
 
@@ -177,15 +178,25 @@ export async function listPendingTransfers(
       throw new ForbiddenError("No warehouse access for transfers");
     }
 
-    if (destinationWarehouseId) {
-      if (!unique.includes(destinationWarehouseId)) {
+    if (warehouseId) {
+      if (!unique.includes(warehouseId)) {
         throw new ForbiddenError("You do not have access to this warehouse");
       }
-      filter.destinationWarehouseId = destinationWarehouseId;
+      filter.$or = [
+        { destinationWarehouseId: warehouseId },
+        { sourceWarehouseId: warehouseId },
+      ];
     } else if (unique.length === 1) {
-      filter.destinationWarehouseId = unique[0];
+      const only = unique[0]!;
+      filter.$or = [
+        { destinationWarehouseId: only },
+        { sourceWarehouseId: only },
+      ];
     } else {
-      filter.destinationWarehouseId = { $in: unique };
+      filter.$or = [
+        { destinationWarehouseId: { $in: unique } },
+        { sourceWarehouseId: { $in: unique } },
+      ];
     }
   }
 
@@ -426,37 +437,40 @@ export async function updateTransferStatus(
     throw new BadRequestError("Invalid transfer ID");
   }
 
+  const transferExists = await Transfer.exists({ _id: transferId });
+  if (!transferExists) {
+    throw new NotFoundError("Transfer not found");
+  }
+
   return runInTransaction(async (session) => {
-    const transfer = await Transfer.findById(transferId).session(session ?? null);
-    if (!transfer) {
-      throw new NotFoundError("Transfer not found");
-    }
-
-    if (transfer.status !== TransferStatus.PENDING) {
-      throw new BadRequestError(
-        `Only pending transfers can be updated (current: ${transfer.status})`
-      );
-    }
-
     if (input.status === TransferStatus.CANCELLED) {
+      const claimed = await Transfer.findOneAndUpdate(
+        { _id: transferId, status: TransferStatus.PENDING },
+        { $set: { status: TransferStatus.CANCELLED } },
+        { new: true, ...(session ? { session } : {}) }
+      );
+      if (!claimed) {
+        throw new BadRequestError(
+          "Only pending transfers can be cancelled (transfer may already be received)"
+        );
+      }
+
       const newQty = await balanceService.adjustBalance(
-        String(transfer.sourceWarehouseId),
-        String(transfer.productId),
-        transfer.quantity,
+        String(claimed.sourceWarehouseId),
+        String(claimed.productId),
+        claimed.quantity,
         session
       );
 
-      // Compensate the STOCK_OUT created when the transfer was initiated so the
-      // movement ledger stays balanced with the restored source quantity.
       const [reversalMovement] = await StockMovement.create(
         [
           {
             type: StockMovementType.STOCK_IN,
-            warehouseId: transfer.sourceWarehouseId,
-            productId: transfer.productId,
-            brandId: transfer.brandId,
-            quantity: transfer.quantity,
-            transferId: transfer._id,
+            warehouseId: claimed.sourceWarehouseId,
+            productId: claimed.productId,
+            brandId: claimed.brandId,
+            quantity: claimed.quantity,
+            transferId: claimed._id,
             notes:
               input.notes?.trim() ||
               "Stock restored — pending transfer cancelled",
@@ -466,22 +480,21 @@ export async function updateTransferStatus(
         dbSession(session)
       );
 
-      transfer.status = TransferStatus.CANCELLED;
-      transfer.stockReturnInMovementId = reversalMovement._id;
-      await transfer.save(dbSession(session));
+      claimed.stockReturnInMovementId = reversalMovement._id;
+      await claimed.save(dbSession(session));
 
-      const snapshot = await transferAuditSnapshot(transfer._id, session);
+      const snapshot = await transferAuditSnapshot(claimed._id, session);
 
       await AuditLog.create(
         [
           {
             action: "TRANSFER_CANCELLED",
             entity: "Transfer",
-            entityId: transfer._id,
+            entityId: claimed._id,
             userId: user.id,
             metadata: buildTransferAuditMetadata({
-              transferId: transfer._id,
-              quantity: transfer.quantity,
+              transferId: claimed._id,
+              quantity: claimed.quantity,
               status: TransferStatus.CANCELLED,
               product: snapshot?.product ?? null,
               brand: snapshot?.brand ?? null,
@@ -498,11 +511,28 @@ export async function updateTransferStatus(
         dbSession(session)
       );
     } else {
-      const destWarehouseId = String(transfer.destinationWarehouseId);
+      const claimed = await Transfer.findOneAndUpdate(
+        { _id: transferId, status: TransferStatus.PENDING },
+        {
+          $set: {
+            status: TransferStatus.RECEIVED,
+            receivedBy: new Types.ObjectId(user.id),
+            receivedAt: new Date(),
+          },
+        },
+        { new: true, ...(session ? { session } : {}) }
+      );
+      if (!claimed) {
+        throw new BadRequestError(
+          "Only pending transfers can be received (transfer may already be received or cancelled)"
+        );
+      }
+
+      const destWarehouseId = String(claimed.destinationWarehouseId);
       const newQty = await balanceService.adjustBalance(
         destWarehouseId,
-        String(transfer.productId),
-        transfer.quantity,
+        String(claimed.productId),
+        claimed.quantity,
         session
       );
 
@@ -514,11 +544,11 @@ export async function updateTransferStatus(
         [
           {
             type: StockMovementType.STOCK_IN,
-            warehouseId: transfer.destinationWarehouseId,
-            productId: transfer.productId,
-            brandId: transfer.brandId,
-            quantity: transfer.quantity,
-            transferId: transfer._id,
+            warehouseId: claimed.destinationWarehouseId,
+            productId: claimed.productId,
+            brandId: claimed.brandId,
+            quantity: claimed.quantity,
+            transferId: claimed._id,
             notes: note,
             createdBy: user.id,
           },
@@ -526,24 +556,21 @@ export async function updateTransferStatus(
         dbSession(session)
       );
 
-      transfer.status = TransferStatus.RECEIVED;
-      transfer.stockInMovementId = movement._id;
-      transfer.receivedBy = new Types.ObjectId(user.id);
-      transfer.receivedAt = new Date();
-      await transfer.save(dbSession(session));
+      claimed.stockInMovementId = movement._id;
+      await claimed.save(dbSession(session));
 
-      const snapshot = await transferAuditSnapshot(transfer._id, session);
+      const snapshot = await transferAuditSnapshot(claimed._id, session);
 
       await AuditLog.create(
         [
           {
             action: "TRANSFER_RECEIVED",
             entity: "Transfer",
-            entityId: transfer._id,
+            entityId: claimed._id,
             userId: user.id,
             metadata: buildTransferAuditMetadata({
-              transferId: transfer._id,
-              quantity: transfer.quantity,
+              transferId: claimed._id,
+              quantity: claimed.quantity,
               status: TransferStatus.RECEIVED,
               product: snapshot?.product ?? null,
               brand: snapshot?.brand ?? null,
@@ -617,10 +644,26 @@ export async function returnTransfer(
 
     assertCanReturnTransfer(user, transfer);
 
-    const sourceId = String(transfer.sourceWarehouseId);
-    const destId = String(transfer.destinationWarehouseId);
-    const productId = String(transfer.productId);
-    const qty = transfer.quantity;
+    const claimed = await Transfer.findOneAndUpdate(
+      { _id: transferId, status: TransferStatus.RECEIVED },
+      {
+        $set: {
+          status: TransferStatus.RETURNED,
+          returnedBy: new Types.ObjectId(user.id),
+          returnedAt: new Date(),
+          returnNotes: input.notes?.trim(),
+        },
+      },
+      { new: false, ...(session ? { session } : {}) }
+    );
+    if (!claimed) {
+      throw new BadRequestError("Transfer is no longer in received status");
+    }
+
+    const sourceId = String(claimed.sourceWarehouseId);
+    const destId = String(claimed.destinationWarehouseId);
+    const productId = String(claimed.productId);
+    const qty = claimed.quantity;
 
     await balanceService.assertSufficientStock(destId, productId, qty, session);
 
@@ -632,11 +675,11 @@ export async function returnTransfer(
       [
         {
           type: StockMovementType.STOCK_OUT,
-          warehouseId: transfer.destinationWarehouseId,
-          productId: transfer.productId,
-          brandId: transfer.brandId,
+          warehouseId: claimed.destinationWarehouseId,
+          productId: claimed.productId,
+          brandId: claimed.brandId,
           quantity: qty,
-          transferId: transfer._id,
+          transferId: claimed._id,
           notes: `Return to source warehouse: ${note}`,
           createdBy: user.id,
         },
@@ -655,11 +698,11 @@ export async function returnTransfer(
       [
         {
           type: StockMovementType.STOCK_IN,
-          warehouseId: transfer.sourceWarehouseId,
-          productId: transfer.productId,
-          brandId: transfer.brandId,
+          warehouseId: claimed.sourceWarehouseId,
+          productId: claimed.productId,
+          brandId: claimed.brandId,
           quantity: qty,
-          transferId: transfer._id,
+          transferId: claimed._id,
           notes: `Return from destination warehouse: ${note}`,
           createdBy: user.id,
         },
@@ -674,25 +717,28 @@ export async function returnTransfer(
       session
     );
 
-    transfer.status = TransferStatus.RETURNED;
-    transfer.returnedBy = new Types.ObjectId(user.id);
-    transfer.returnedAt = new Date();
-    transfer.returnNotes = input.notes?.trim();
-    transfer.stockReturnOutMovementId = outMovement._id;
-    transfer.stockReturnInMovementId = inMovement._id;
-    await transfer.save(dbSession(session));
+    await Transfer.updateOne(
+      { _id: claimed._id },
+      {
+        $set: {
+          stockReturnOutMovementId: outMovement._id,
+          stockReturnInMovementId: inMovement._id,
+        },
+      },
+      dbSession(session)
+    );
 
-    const snapshot = await transferAuditSnapshot(transfer._id, session);
+    const snapshot = await transferAuditSnapshot(claimed._id, session);
 
     await AuditLog.create(
       [
         {
           action: "TRANSFER_RETURNED",
           entity: "Transfer",
-          entityId: transfer._id,
+          entityId: claimed._id,
           userId: user.id,
           metadata: buildTransferAuditMetadata({
-            transferId: transfer._id,
+            transferId: claimed._id,
             quantity: qty,
             status: TransferStatus.RETURNED,
             product: snapshot?.product ?? null,
@@ -762,10 +808,28 @@ export async function returnInTransitTransfer(
 
     assertCanReturnInTransit(user, transfer);
 
+    const claimed = await Transfer.findOneAndUpdate(
+      { _id: transferId, status: TransferStatus.PENDING },
+      {
+        $set: {
+          status: TransferStatus.CANCELLED,
+          returnNotes: input.notes?.trim(),
+          returnedBy: new Types.ObjectId(user.id),
+          returnedAt: new Date(),
+        },
+      },
+      { new: true, ...(session ? { session } : {}) }
+    );
+    if (!claimed) {
+      throw new BadRequestError(
+        "Only in-transit transfers can be returned (transfer may already be received or cancelled)"
+      );
+    }
+
     const newQty = await balanceService.adjustBalance(
-      String(transfer.sourceWarehouseId),
-      String(transfer.productId),
-      transfer.quantity,
+      String(claimed.sourceWarehouseId),
+      String(claimed.productId),
+      claimed.quantity,
       session
     );
 
@@ -777,11 +841,11 @@ export async function returnInTransitTransfer(
       [
         {
           type: StockMovementType.STOCK_IN,
-          warehouseId: transfer.sourceWarehouseId,
-          productId: transfer.productId,
-          brandId: transfer.brandId,
-          quantity: transfer.quantity,
-          transferId: transfer._id,
+          warehouseId: claimed.sourceWarehouseId,
+          productId: claimed.productId,
+          brandId: claimed.brandId,
+          quantity: claimed.quantity,
+          transferId: claimed._id,
           notes: note,
           createdBy: user.id,
         },
@@ -789,25 +853,21 @@ export async function returnInTransitTransfer(
       dbSession(session)
     );
 
-    transfer.status = TransferStatus.CANCELLED;
-    transfer.stockReturnInMovementId = reversalMovement._id;
-    transfer.returnNotes = note;
-    transfer.returnedBy = new Types.ObjectId(user.id);
-    transfer.returnedAt = new Date();
-    await transfer.save(dbSession(session));
+    claimed.stockReturnInMovementId = reversalMovement._id;
+    await claimed.save(dbSession(session));
 
-    const snapshot = await transferAuditSnapshot(transfer._id, session);
+    const snapshot = await transferAuditSnapshot(claimed._id, session);
 
     await AuditLog.create(
       [
         {
           action: "TRANSFER_RETURNED_IN_TRANSIT",
           entity: "Transfer",
-          entityId: transfer._id,
+          entityId: claimed._id,
           userId: user.id,
           metadata: buildTransferAuditMetadata({
-            transferId: transfer._id,
-            quantity: transfer.quantity,
+            transferId: claimed._id,
+            quantity: claimed.quantity,
             status: TransferStatus.CANCELLED,
             product: snapshot?.product ?? null,
             brand: snapshot?.brand ?? null,

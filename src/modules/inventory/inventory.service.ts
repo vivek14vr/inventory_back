@@ -12,6 +12,10 @@ import type { AuthUser } from "../../shared/types/auth.js";
 import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
 import * as balanceService from "../stock/inventory.service.js";
 import {
+  saleQuantityInventoryDelta,
+  sumReturnedQuantityForSale,
+} from "../stock/saleReturn.utils.js";
+import {
   DispatchType,
   StockMovementType,
   TransferStatus,
@@ -1654,7 +1658,29 @@ export async function updateMovementInvoice(
       if (nextQuantity < 0) {
         throw new BadRequestError("Quantity cannot be negative");
       }
-      const delta = previousQuantity - nextQuantity;
+
+      const returnedQuantity = await sumReturnedQuantityForSale(
+        {
+          _id: movement._id,
+          invoiceNumber: movement.invoiceNumber,
+          clientName: movement.clientName,
+          productId: movement.productId,
+          warehouseId: movement.warehouseId,
+        },
+        session
+      );
+
+      if (nextQuantity < returnedQuantity) {
+        throw new BadRequestError(
+          `Sold quantity cannot be below ${returnedQuantity} — that much has already been returned on this line`
+        );
+      }
+
+      const delta = saleQuantityInventoryDelta(
+        previousQuantity,
+        nextQuantity,
+        returnedQuantity
+      );
       if (delta < 0) {
         await balanceService.assertSufficientStock(
           String(movement.warehouseId),
@@ -1681,10 +1707,18 @@ export async function updateMovementInvoice(
       movement.clientName = nextClient || undefined;
     }
     if (markingWorked) {
-      await StockMovement.updateMany(
-        { invoiceLastWorkedAt: { $exists: true } },
-        { $unset: { invoiceLastWorkedAt: 1 } }
-      ).session(session ?? null);
+      const workedFilter: Record<string, unknown> = {
+        invoiceLastWorkedAt: { $exists: true },
+      };
+      if (movement.invoiceNumber?.trim()) {
+        workedFilter.invoiceNumber = movement.invoiceNumber.trim();
+      }
+      if (movement.clientName?.trim()) {
+        workedFilter.clientName = movement.clientName.trim();
+      }
+      await StockMovement.updateMany(workedFilter, {
+        $unset: { invoiceLastWorkedAt: 1 },
+      }).session(session ?? null);
       movement.invoiceLastWorkedAt = new Date();
     } else if (unmarkingWorked) {
       movement.invoiceLastWorkedAt = undefined;
@@ -1761,12 +1795,36 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
       throw new BadRequestError("Only client sale invoices can be deleted");
     }
 
-    await balanceService.adjustBalance(
-      String(movement.warehouseId),
-      String(movement.productId),
-      movement.quantity,
+    const returnedQuantity = await sumReturnedQuantityForSale(
+      {
+        _id: movement._id,
+        invoiceNumber: movement.invoiceNumber,
+        clientName: movement.clientName,
+        productId: movement.productId,
+        warehouseId: movement.warehouseId,
+      },
       session
     );
+
+    const restoreQuantity = movement.quantity - returnedQuantity;
+    if (restoreQuantity > 0) {
+      await balanceService.adjustBalance(
+        String(movement.warehouseId),
+        String(movement.productId),
+        restoreQuantity,
+        session
+      );
+    }
+
+    await StockMovement.deleteMany({
+      $or: [
+        { _id: movement._id },
+        {
+          type: StockMovementType.STOCK_IN,
+          relatedSaleMovementId: movement._id,
+        },
+      ],
+    }).session(session ?? null);
 
     const product = await Product.findById(movement.productId).lean();
     const warehouse = await Warehouse.findById(movement.warehouseId).lean();
@@ -1783,6 +1841,8 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
             invoiceNumber: movement.invoiceNumber,
             clientName: movement.clientName,
             quantity: movement.quantity,
+            returnedQuantity,
+            restoredQuantity: restoreQuantity,
             productName: product?.name,
             warehouseName: warehouse?.name,
           },
@@ -1790,8 +1850,6 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
       ],
       dbSession(session)
     );
-
-    await StockMovement.findByIdAndDelete(movementId).session(session ?? null);
 
     return { deleted: true, id: movementId };
   });

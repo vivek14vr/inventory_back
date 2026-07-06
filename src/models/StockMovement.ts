@@ -28,7 +28,7 @@ const stockMovementSchema = new Schema<IStockMovement>(
     warehouseId: { type: Schema.Types.ObjectId, ref: "Warehouse", required: true },
     productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     brandId: { type: Schema.Types.ObjectId, ref: "Brand", required: true },
-    quantity: { type: Number, required: true, min: 1 },
+    quantity: { type: Number, required: true, min: 0 },
     dispatchType: { type: String, enum: ["TRANSFER", "DIRECT_SELLING"] },
     clientName: { type: String, trim: true },
     invoiceNumber: { type: String, trim: true },

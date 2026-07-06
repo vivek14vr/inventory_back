@@ -718,7 +718,8 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
         warehouseId,
         String(line.productId),
         -line.quantity,
-        session
+        session,
+        { allowNegative: input.allowInsufficientStock }
       );
       balances[String(line.productId)] = newQty;
 

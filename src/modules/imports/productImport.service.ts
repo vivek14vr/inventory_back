@@ -445,29 +445,27 @@ async function applyImportedWarehouseThresholds(
   );
 }
 
-function buildWarehouseThresholdsWithDefaults(
+function buildExplicitWarehouseThresholds(
   parsed: ParsedProductImportRow,
   warehouses: Array<{ _id: Types.ObjectId; name: string; code: string }>
 ): WarehouseLowStockImportEntry[] {
-  const importedByKey = new Map<string, number>();
-  for (const entry of parsed.warehouseLowStockThresholds ?? []) {
-    importedByKey.set(entry.warehouseName.trim().toLowerCase(), entry.lowStockThreshold);
+  const warehouseByKey = new Map<string, { _id: Types.ObjectId; name: string }>();
+  for (const warehouse of warehouses) {
+    warehouseByKey.set(warehouse.name.trim().toLowerCase(), warehouse);
+    warehouseByKey.set(warehouse.code.trim().toLowerCase(), warehouse);
   }
 
-  return warehouses.map((warehouse) => {
-    const nameKey = warehouse.name.trim().toLowerCase();
-    const codeKey = warehouse.code.trim().toLowerCase();
-    const imported =
-      importedByKey.get(nameKey) ?? importedByKey.get(codeKey);
-    return {
+  const entries: WarehouseLowStockImportEntry[] = [];
+  for (const entry of parsed.warehouseLowStockThresholds ?? []) {
+    const warehouse = warehouseByKey.get(entry.warehouseName.trim().toLowerCase());
+    if (!warehouse) continue;
+    entries.push({
       warehouseName: warehouse.name,
       warehouseId: String(warehouse._id),
-      lowStockThreshold: resolveLowStockThresholdWithDefault(
-        imported,
-        parsed.unitsPerStockUnit
-      ),
-    };
-  });
+      lowStockThreshold: entry.lowStockThreshold,
+    });
+  }
+  return entries;
 }
 
 async function resetImportedProductStockToZero(productId: string) {
@@ -487,13 +485,15 @@ async function finalizeImportedProduct(
   }
 
   const warehouses = await Warehouse.find({ isActive: true }).select("name code").lean();
-  const warehouseThresholds = buildWarehouseThresholdsWithDefaults(parsed, warehouses);
-  await applyImportedWarehouseThresholds(
-    productId,
-    warehouseThresholds,
-    parsed.unitsPerStockUnit,
-    user
-  );
+  const explicitThresholds = buildExplicitWarehouseThresholds(parsed, warehouses);
+  if (explicitThresholds.length > 0) {
+    await applyImportedWarehouseThresholds(
+      productId,
+      explicitThresholds,
+      parsed.unitsPerStockUnit,
+      user
+    );
+  }
 }
 
 async function loadImportContext() {
@@ -837,9 +837,7 @@ export async function confirmProductImport(
           secondaryName: nextSecondary,
           ...(wasInactive ? { isActive: true } : {}),
         });
-        await finalizeImportedProduct(String(targetProduct._id), parsed, user, {
-          resetStock: wasInactive,
-        });
+        await finalizeImportedProduct(String(targetProduct._id), parsed, user);
 
         if (wasInactive) {
           const idx = allProducts.findIndex(
