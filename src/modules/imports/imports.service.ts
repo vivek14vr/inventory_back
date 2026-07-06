@@ -7,6 +7,7 @@ import { TallyImport, type ITallyImportRow } from "../../models/TallyImport.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { AuditLog } from "../../models/AuditLog.js";
 import { StockMovementType } from "../../shared/constants/roles.js";
+import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import {
   BadRequestError,
   NotFoundError,
@@ -33,7 +34,7 @@ function normalizeHeader(value: unknown): string {
     .replace(/\s+/g, " ");
 }
 
-function parseExcelBuffer(buffer: Buffer): ParsedRow[] {
+export function parseTallyExcelBuffer(buffer: Buffer): ParsedRow[] {
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) {
@@ -89,6 +90,7 @@ function parseExcelBuffer(buffer: Buffer): ParsedRow[] {
     throw new BadRequestError("No valid data rows found in Excel file");
   }
 
+  assertImportRowCount(rows.length, "Tally import file");
   return rows;
 }
 
@@ -107,7 +109,7 @@ export async function processTallyImport(
     throw new NotFoundError("Warehouse not found or inactive");
   }
 
-  const parsedRows = parseExcelBuffer(fileBuffer);
+  const parsedRows = parseTallyExcelBuffer(fileBuffer);
   const seen = new Set<string>();
   const results: ITallyImportRow[] = [];
 

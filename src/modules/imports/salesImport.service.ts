@@ -7,6 +7,7 @@ import { StockMovement } from "../../models/StockMovement.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
+import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
@@ -360,6 +361,8 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
     );
   }
 
+  const lineCount = vouchers.reduce((sum, voucher) => sum + voucher.lines.length, 0);
+  assertImportRowCount(lineCount, "Sales register file");
   return vouchers;
 }
 
@@ -561,6 +564,9 @@ async function deactivateImportedProducts(productIds: string[]): Promise<void> {
 }
 
 export async function confirmSalesImport(input: SalesImportConfirmInput, user: AuthUser) {
+  const lineCount = input.vouchers.reduce((sum, voucher) => sum + voucher.lines.length, 0);
+  assertImportRowCount(lineCount, "Sales import confirm");
+
   const warehouseId = input.warehouseId.trim();
   if (!Types.ObjectId.isValid(warehouseId)) {
     throw new BadRequestError("Invalid warehouse ID");

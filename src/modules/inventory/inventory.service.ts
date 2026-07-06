@@ -1126,7 +1126,10 @@ export async function adjustStockBalance(input: AdjustStockInput, user: AuthUser
   });
 }
 
-export async function ensureProductBalancesForAllWarehouses(productId: string) {
+export async function ensureProductBalancesForAllWarehouses(
+  productId: string,
+  session?: ClientSession | null
+) {
   if (!Types.ObjectId.isValid(productId)) {
     throw new BadRequestError("Invalid product");
   }
@@ -1154,7 +1157,7 @@ export async function ensureProductBalancesForAllWarehouses(productId: string) {
     }));
 
   if (missing.length > 0) {
-    await InventoryBalance.insertMany(missing);
+    await InventoryBalance.insertMany(missing, dbSession(session));
   }
 }
 
@@ -1852,6 +1855,14 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
         {
           type: StockMovementType.STOCK_IN,
           relatedSaleMovementId: movement._id,
+        },
+        {
+          type: StockMovementType.STOCK_IN,
+          relatedSaleMovementId: { $exists: false },
+          invoiceNumber: exactCaseInsensitiveRegex(movement.invoiceNumber ?? ""),
+          clientName: exactCaseInsensitiveRegex(movement.clientName ?? ""),
+          productId: movement.productId,
+          warehouseId: movement.warehouseId,
         },
       ],
     }).session(session ?? null);

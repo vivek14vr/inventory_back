@@ -1,10 +1,11 @@
-import { Types } from "mongoose";
+import { Types, type ClientSession } from "mongoose";
 import * as XLSX from "xlsx";
 import { AuditLog } from "../../models/AuditLog.js";
 import { Brand } from "../../models/Brand.js";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
 import { Warehouse } from "../../models/Warehouse.js";
+import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { normalizeProductName } from "../../shared/utils/productName.js";
@@ -18,7 +19,7 @@ import {
 import {
   resolveLowStockThresholdWithDefault,
 } from "../../shared/constants/lowStockDefaults.js";
-import { runInTransaction } from "../../shared/utils/mongoTransaction.js";
+import { runInTransaction, dbSession } from "../../shared/utils/mongoTransaction.js";
 import type { ProductImportConfirmInput } from "./imports.validation.js";
 
 export type WarehouseLowStockImportEntry = {
@@ -371,6 +372,7 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
     throw new BadRequestError("No valid product rows found in Excel file");
   }
 
+  assertImportRowCount(rows.length, "Product import file");
   return rows;
 }
 
@@ -469,20 +471,28 @@ function buildExplicitWarehouseThresholds(
   return entries;
 }
 
-async function resetImportedProductStockToZero(productId: string) {
-  await InventoryBalance.updateMany({ productId }, { $set: { quantity: 0 } });
+async function resetImportedProductStockToZero(
+  productId: string,
+  session?: ClientSession | null
+) {
+  await InventoryBalance.updateMany(
+    { productId },
+    { $set: { quantity: 0 } },
+    dbSession(session)
+  );
 }
 
 async function finalizeImportedProduct(
   productId: string,
   parsed: ParsedProductImportRow,
   user: AuthUser,
-  options?: { resetStock?: boolean }
+  options?: { resetStock?: boolean },
+  session?: ClientSession | null
 ) {
-  await ensureProductBalancesForAllWarehouses(productId);
+  await ensureProductBalancesForAllWarehouses(productId, session);
 
   if (options?.resetStock) {
-    await resetImportedProductStockToZero(productId);
+    await resetImportedProductStockToZero(productId, session);
   }
 
   const warehouses = await Warehouse.find({ isActive: true }).select("name code").lean();
@@ -733,6 +743,8 @@ export async function confirmProductImport(
   input: ProductImportConfirmInput,
   user: AuthUser
 ) {
+  assertImportRowCount(input.rows.length, "Product import confirm");
+
   const warehouses = await Warehouse.find({ isActive: true }).select("name code").lean();
 
   const { brands, products, allProducts } = await loadImportContext();
@@ -788,7 +800,7 @@ export async function confirmProductImport(
       );
       const brandId = String(brand._id);
 
-      const rowResult = await runInTransaction(async () => {
+      const rowResult = await runInTransaction(async (session) => {
       if (row.action === "merge") {
         const targetId = row.mergeTargetProductId;
         let targetProduct =
@@ -841,7 +853,7 @@ export async function confirmProductImport(
           secondaryName: nextSecondary,
           ...(wasInactive ? { isActive: true } : {}),
         });
-        await finalizeImportedProduct(String(targetProduct._id), parsed, user);
+        await finalizeImportedProduct(String(targetProduct._id), parsed, user, undefined, session);
 
         return {
           status: "SUCCESS" as const,
@@ -855,7 +867,7 @@ export async function confirmProductImport(
       }
 
       const created = await createProduct(productPayloadFromRow(parsed, brandId));
-      await finalizeImportedProduct(created.id, parsed, user, { resetStock: true });
+      await finalizeImportedProduct(created.id, parsed, user, { resetStock: true }, session);
       return {
         status: "SUCCESS" as const,
         message: "Created new product",

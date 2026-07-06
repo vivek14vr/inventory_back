@@ -220,7 +220,7 @@ async function findSaleMovements(
   };
 
   if (clientName) {
-    filter.clientName = clientName;
+    filter.clientName = exactCaseInsensitiveRegex(clientName);
   }
   if (warehouseId) {
     filter.warehouseId = new Types.ObjectId(warehouseId);
@@ -386,6 +386,10 @@ export async function listClientReturnInvoices(
 
   const unlinkedByKey = new Map<string, number>();
   if (invoiceNumbers.size > 0) {
+    const invoiceMatchers = [...invoiceNumbers].map((invoiceNumber) => ({
+      invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
+    }));
+
     const unlinkedReturns = await StockMovement.aggregate<{
       _id: {
         invoiceNumber: string;
@@ -399,7 +403,7 @@ export async function listClientReturnInvoices(
         $match: {
           type: StockMovementType.STOCK_IN,
           relatedSaleMovementId: { $exists: false },
-          invoiceNumber: { $in: [...invoiceNumbers] },
+          $or: invoiceMatchers,
         },
       },
       {
@@ -436,7 +440,7 @@ export async function listClientReturnInvoices(
       String(sale.productId),
     ].join("|");
 
-    if ((saleLineCountByProductKey.get(productKey) ?? 0) === 1) {
+    if ((saleLineCountByProductKey.get(productKey) ?? 0) >= 1) {
       const warehouse = sale.warehouseId as unknown as { _id: Types.ObjectId } | Types.ObjectId;
       const warehouseId =
         typeof warehouse === "object" && warehouse && "_id" in warehouse
@@ -448,7 +452,24 @@ export async function listClientReturnInvoices(
         String(sale.productId),
         warehouseId,
       ].join("|");
-      total += unlinkedByKey.get(unlinkedKey) ?? 0;
+
+      const lineCount = saleLineCountByProductKey.get(productKey) ?? 0;
+      if (lineCount === 1) {
+        total += unlinkedByKey.get(unlinkedKey) ?? 0;
+      } else {
+        const matchingSales = sales.filter(
+          (candidate) =>
+            (candidate.invoiceNumber?.trim().toLowerCase() ?? "") ===
+              invoiceNumber.toLowerCase() &&
+            (candidate.clientName?.trim().toLowerCase() ?? "") ===
+              clientName.toLowerCase() &&
+            String(candidate.productId) === String(sale.productId)
+        );
+        const firstSaleForProduct = matchingSales.at(-1);
+        if (firstSaleForProduct && String(firstSaleForProduct._id) === String(sale._id)) {
+          total += unlinkedByKey.get(unlinkedKey) ?? 0;
+        }
+      }
     }
 
     return total;

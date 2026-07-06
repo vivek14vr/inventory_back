@@ -4,6 +4,7 @@ import {
   DispatchType,
   StockMovementType,
 } from "../../shared/constants/roles.js";
+import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 
 type SaleMovementRef = {
   _id: Types.ObjectId;
@@ -13,19 +14,61 @@ type SaleMovementRef = {
   warehouseId: Types.ObjectId;
 };
 
+function saleLineFilter(
+  invoiceNumber: string,
+  clientName: string,
+  productId: Types.ObjectId
+) {
+  return {
+    type: StockMovementType.STOCK_OUT,
+    dispatchType: DispatchType.DIRECT_SELLING,
+    invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
+    clientName: exactCaseInsensitiveRegex(clientName),
+    productId,
+  };
+}
+
+function unlinkedReturnFilter(
+  invoiceNumber: string,
+  clientName: string,
+  productId: Types.ObjectId,
+  warehouseId: Types.ObjectId
+) {
+  return {
+    type: StockMovementType.STOCK_IN,
+    relatedSaleMovementId: { $exists: false },
+    invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
+    clientName: exactCaseInsensitiveRegex(clientName),
+    productId,
+    warehouseId,
+  };
+}
+
 async function countSaleLinesForProductOnInvoice(
   invoiceNumber: string,
   clientName: string,
   productId: Types.ObjectId,
   session?: ClientSession | null
 ): Promise<number> {
-  return StockMovement.countDocuments({
-    type: StockMovementType.STOCK_OUT,
-    dispatchType: DispatchType.DIRECT_SELLING,
-    invoiceNumber,
-    clientName,
-    productId,
-  }).session(session ?? null);
+  return StockMovement.countDocuments(
+    saleLineFilter(invoiceNumber, clientName, productId)
+  ).session(session ?? null);
+}
+
+async function sumUnlinkedReturnQuantity(
+  invoiceNumber: string,
+  clientName: string,
+  productId: Types.ObjectId,
+  warehouseId: Types.ObjectId,
+  session?: ClientSession | null
+): Promise<number> {
+  const unlinked = await StockMovement.find(
+    unlinkedReturnFilter(invoiceNumber, clientName, productId, warehouseId)
+  )
+    .session(session ?? null)
+    .lean();
+
+  return unlinked.reduce((sum, row) => sum + row.quantity, 0);
 }
 
 /** Total quantity already returned against a sale line (linked + legacy unlinked). */
@@ -56,19 +99,25 @@ export async function sumReturnedQuantityForSale(
     session
   );
 
-  if (saleLinesForProduct === 1) {
-    const unlinked = await StockMovement.find({
-      type: StockMovementType.STOCK_IN,
-      relatedSaleMovementId: { $exists: false },
+  if (saleLinesForProduct === 0) return total;
+
+  const shouldIncludeUnlinked =
+    saleLinesForProduct === 1 ||
+    (await StockMovement.findOne(saleLineFilter(invoiceNumber, clientName, sale.productId))
+      .sort({ createdAt: 1 })
+      .select("_id")
+      .session(session ?? null)
+      .lean()
+      .then((first) => first && String(first._id) === String(sale._id)));
+
+  if (shouldIncludeUnlinked) {
+    total += await sumUnlinkedReturnQuantity(
       invoiceNumber,
       clientName,
-      productId: sale.productId,
-      warehouseId: sale.warehouseId,
-    })
-      .session(session ?? null)
-      .lean();
-
-    total += unlinked.reduce((sum, row) => sum + row.quantity, 0);
+      sale.productId,
+      sale.warehouseId,
+      session
+    );
   }
 
   return total;

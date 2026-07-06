@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-06  
 **Scope:** Backend (`src/`) + Frontend (`frontend/src/`)  
-**Status:** Findings listed only — not yet remediated  
+**Status:** Remediation complete — see Changelog and per-item status below  
 **Validation at scan time:** Backend 57/57 tests pass, `tsc` OK; frontend lint + build OK
 
 ---
@@ -211,7 +211,7 @@
 |-------|-------|
 | **File** | Infrastructure / deployment |
 | **Impact** | Dev or single-node setups can leave inconsistent state under failure |
-| **Status** | Open |
+| **Status** | Mitigated — documented in `docs/OPERATIONS.md`; `mongoTransaction.ts` warns on standalone |
 
 ### AUDIT-022 — `multer` / `xlsx` dependency advisories
 
@@ -219,7 +219,7 @@
 |-------|-------|
 | **File** | `package.json` (import endpoints) |
 | **Impact** | Known DoS / parsing risks on file upload endpoints |
-| **Status** | Open |
+| **Status** | Mitigated — 10 MB upload cap, 5,000-row parser limit; see `docs/OPERATIONS.md` |
 
 ---
 
@@ -339,7 +339,7 @@
 |-------|-------|
 | **Area** | Frontend |
 | **Impact** | Route exists but adds no unique behavior |
-| **Status** | Open |
+| **Status** | Fixed — `/app/receive` and `/admin/receive` redirect to transfer; constants alias transfer |
 
 ### AUDIT-037 — `uploadTally` API has no UI
 
@@ -347,7 +347,7 @@
 |-------|-------|
 | **Area** | Frontend / API |
 | **Impact** | Dead or undocumented surface |
-| **Status** | Open |
+| **Status** | Accepted — direct sell import covers client deductions; legacy `/imports/tally` API retained without UI |
 
 ### AUDIT-038 — `ReturnPanel` success state is dead code
 
@@ -372,7 +372,7 @@
 |-------|-------|
 | **Area** | Both |
 | **Impact** | Missing coverage for concurrency, return + qty-update interactions, sales import edge cases |
-| **Status** | Open |
+| **Status** | Partial — unit tests for sale-return deltas, import parsers, and row limits; no full DB integration suite |
 
 ---
 
@@ -403,3 +403,5 @@
 | 2026-07-06 | System scan | Initial audit — 40 findings |
 | 2026-07-06 | Remediation | Fixed AUDIT-001–015, 019, 027 (partial); see git history |
 | 2026-07-06 | Remediation | Fixed AUDIT-017–020, 023–026, 028–035, 038–039; see git history |
+| 2026-07-06 | Remediation | AUDIT-021–022 mitigated (docs + row limits); 036–037 fixed; 040 partial (parser/limit tests) |
+| 2026-07-06 | Remediation | Residual fixes: case-insensitive returns, invoice delete cleanup, atomic duplicate import, confirm row limits |

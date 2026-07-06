@@ -13,6 +13,7 @@ import {
   TransferStatus,
 } from "../../shared/constants/roles.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../shared/errors/AppError.js";
+import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
 import {
@@ -699,6 +700,21 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
   const notes = input.notes?.trim() || undefined;
 
   const txnResult = await runInTransaction(async (session) => {
+    if (invoiceNumber && clientName) {
+      const duplicateInvoice = await StockMovement.exists({
+        type: StockMovementType.STOCK_OUT,
+        dispatchType: DispatchType.DIRECT_SELLING,
+        warehouseId: new Types.ObjectId(warehouseId),
+        invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
+        clientName: exactCaseInsensitiveRegex(clientName),
+      }).session(session ?? null);
+      if (duplicateInvoice) {
+        throw new BadRequestError(
+          `Invoice ${invoiceNumber} for ${clientName} was already imported at this warehouse`
+        );
+      }
+    }
+
     if (!input.allowInsufficientStock) {
       for (const line of validatedLines) {
         await inventoryService.assertSufficientStock(
