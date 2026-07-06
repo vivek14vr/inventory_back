@@ -69,10 +69,10 @@ export function resolveLowStockThreshold(
 }
 
 export function isWarehouseLowStock(row: LowStockStockRow): boolean {
-  if (row.lowStockThreshold === undefined || row.lowStockThreshold === null) {
+  if (row.lowStockThreshold == null || row.lowStockThreshold <= 0) {
     return false;
   }
-  return row.quantity > 0 && row.quantity <= row.lowStockThreshold;
+  return row.quantity <= row.lowStockThreshold;
 }
 
 export function isTotalLowStock(
@@ -82,7 +82,7 @@ export function isTotalLowStock(
   if (productTotalLowStockThreshold == null || productTotalLowStockThreshold <= 0) {
     return false;
   }
-  return totalQuantity > 0 && totalQuantity <= productTotalLowStockThreshold;
+  return totalQuantity <= productTotalLowStockThreshold;
 }
 
 export function buildLowStockTotals(rows: LowStockStockRow[]): LowStockTotalRow[] {
@@ -92,8 +92,6 @@ export function buildLowStockTotals(rows: LowStockStockRow[]): LowStockTotalRow[
   >();
 
   for (const row of rows) {
-    if (row.quantity <= 0) continue;
-
     const existing = byProduct.get(row.productId);
     if (!existing) {
       byProduct.set(row.productId, {
@@ -124,7 +122,6 @@ export function buildLowStockTotals(rows: LowStockStockRow[]): LowStockTotalRow[
       (row) =>
         row.overallThreshold != null &&
         row.overallThreshold > 0 &&
-        row.totalQuantity > 0 &&
         row.totalQuantity <= row.overallThreshold
     )
     .map(({ overallThreshold: _overallThreshold, ...row }) => row);

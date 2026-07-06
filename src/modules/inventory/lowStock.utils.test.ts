@@ -62,8 +62,12 @@ describe("isWarehouseLowStock", () => {
     assert.equal(isWarehouseLowStock(row({ quantity: 50, lowStockThreshold: 50 })), true);
   });
 
-  it("ignores zero stock and missing thresholds", () => {
-    assert.equal(isWarehouseLowStock(row({ quantity: 0, lowStockThreshold: 50 })), false);
+  it("flags zero stock when a positive threshold is set", () => {
+    assert.equal(isWarehouseLowStock(row({ quantity: 0, lowStockThreshold: 50 })), true);
+  });
+
+  it("ignores missing or zero thresholds", () => {
+    assert.equal(isWarehouseLowStock(row({ quantity: 0, lowStockThreshold: 0 })), false);
     assert.equal(isWarehouseLowStock(row({ quantity: 10 })), false);
   });
 });
@@ -73,6 +77,7 @@ describe("isTotalLowStock", () => {
     assert.equal(isTotalLowStock(40, 50), true);
     assert.equal(isTotalLowStock(60, 50), false);
     assert.equal(isTotalLowStock(40, undefined), false);
+    assert.equal(isTotalLowStock(0, 50), true);
   });
 });
 
@@ -113,6 +118,20 @@ describe("buildLowStockTotals", () => {
     assert.equal(totals.length, 1);
     assert.equal(totals[0]?.totalQuantity, 45);
     assert.equal(totals[0]?.totalLowStockThreshold, 50);
+  });
+
+  it("flags zero total quantity when overall threshold is set", () => {
+    const totals = buildLowStockTotals([
+      row({
+        productId: "p1",
+        quantity: 0,
+        lowStockThreshold: 10,
+        productTotalLowStockThreshold: 50,
+      }),
+    ]);
+
+    assert.equal(totals.length, 1);
+    assert.equal(totals[0]?.totalQuantity, 0);
   });
 
   it("does not flag total low stock when quantity exceeds explicit product total", () => {

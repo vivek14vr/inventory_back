@@ -784,7 +784,7 @@ export async function listMovementHistory(query: MovementsQuery) {
 export async function listLowStock(query: LowStockQuery) {
   const sharedFilters = {
     brandId: query.brandId,
-    includeZero: false as const,
+    includeZero: true as const,
   };
 
   const [warehouseScopedRows, allWarehouseRows] = await Promise.all([
@@ -868,7 +868,7 @@ export async function listLowStock(query: LowStockQuery) {
 }
 
 export async function getAdminDashboard() {
-  const allRows = await fetchStockRows({ includeZero: false });
+  const allRows = await fetchStockRows({ includeZero: true });
   const stockSummary = buildStockSummary(allRows);
 
   const [recentMovements, pendingTransfers, warehouses, recentSales] =
