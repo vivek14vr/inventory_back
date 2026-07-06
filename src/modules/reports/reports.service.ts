@@ -227,29 +227,95 @@ async function salesMovements(query: ReportFilter) {
     .lean();
 }
 
+function salesMovementLine(m: Awaited<ReturnType<typeof salesMovements>>[number]) {
+  const product = m.productId as unknown as {
+    name: string;
+    stockUnit?: string;
+    unitsPerStockUnit?: number;
+    baseUnit?: string;
+  };
+  const brand = m.brandId as unknown as { name: string };
+  const warehouse = m.warehouseId as unknown as { code: string };
+
+  return {
+    product: product.name,
+    brand: brand.name,
+    warehouse: warehouse.code,
+    quantity: m.quantity,
+    stockUnit: product.stockUnit ?? "unit",
+    unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
+    baseUnit: product.baseUnit ?? "piece",
+  };
+}
+
 export async function reportSalesByClient(query: ReportFilter) {
   const movements = await salesMovements(query);
   const grouped = new Map<
     string,
-    { clientName: string; totalQuantity: number; invoiceCount: number }
+    {
+      clientName: string;
+      totalQuantity: number;
+      invoices: Map<
+        string,
+        {
+          invoiceNumber: string;
+          date: Date;
+          warehouse: string;
+          totalQuantity: number;
+          lineCount: number;
+          lines: ReturnType<typeof salesMovementLine>[];
+        }
+      >;
+    }
   >();
 
   for (const m of movements) {
     const client = m.clientName ?? "Unknown";
+    const line = salesMovementLine(m);
+    const invoiceNumber = m.invoiceNumber ?? "";
+    const invoiceKey = `${invoiceNumber}\0${line.warehouse}`;
+
     const g = grouped.get(client) ?? {
       clientName: client,
       totalQuantity: 0,
-      invoiceCount: 0,
+      invoices: new Map(),
     };
     g.totalQuantity += m.quantity;
-    g.invoiceCount += 1;
+
+    let inv = g.invoices.get(invoiceKey);
+    if (!inv) {
+      inv = {
+        invoiceNumber,
+        date: m.createdAt,
+        warehouse: line.warehouse,
+        totalQuantity: 0,
+        lineCount: 0,
+        lines: [],
+      };
+      g.invoices.set(invoiceKey, inv);
+    }
+    inv.totalQuantity += m.quantity;
+    inv.lineCount += 1;
+    inv.lines.push(line);
+    if (m.createdAt < inv.date) {
+      inv.date = m.createdAt;
+    }
     grouped.set(client, g);
   }
 
   return {
-    rows: Array.from(grouped.values()).sort((a, b) =>
-      a.clientName.localeCompare(b.clientName)
-    ),
+    rows: Array.from(grouped.values())
+      .map((g) => ({
+        clientName: g.clientName,
+        totalQuantity: g.totalQuantity,
+        invoiceCount: g.invoices.size,
+        invoices: Array.from(g.invoices.values()).sort((a, b) => {
+          const byDate = new Date(b.date).getTime() - new Date(a.date).getTime();
+          if (byDate !== 0) return byDate;
+          return a.invoiceNumber.localeCompare(b.invoiceNumber);
+        }),
+      }))
+      .sort((a, b) => a.clientName.localeCompare(b.clientName)),
   };
 }
 

@@ -3,6 +3,7 @@ import { healthRoutes } from "../modules/health/health.routes.js";
 import { authRoutes } from "../modules/auth/auth.routes.js";
 import { warehousesRoutes } from "../modules/warehouses/warehouses.routes.js";
 import { brandsRoutes } from "../modules/brands/brands.routes.js";
+import { clientsRoutes } from "../modules/clients/clients.routes.js";
 import { productsRoutes } from "../modules/products/products.routes.js";
 import { stockRoutes } from "../modules/stock/stock.routes.js";
 import { inventoryRoutes } from "../modules/inventory/inventory.routes.js";
@@ -25,6 +26,7 @@ export function createApiRouter(): Router {
   router.use("/users", usersRoutes);
   router.use("/warehouses", warehousesRoutes);
   router.use("/brands", brandsRoutes);
+  router.use("/clients", clientsRoutes);
   router.use("/products", productsRoutes);
   router.use("/stock", stockRoutes);
   router.use("/inventory", inventoryRoutes);

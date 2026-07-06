@@ -2,6 +2,7 @@ import { Types } from "mongoose";
 import * as XLSX from "xlsx";
 import { AuditLog } from "../../models/AuditLog.js";
 import { Brand } from "../../models/Brand.js";
+import { Client } from "../../models/Client.js";
 import { Product } from "../../models/Product.js";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Warehouse } from "../../models/Warehouse.js";
@@ -12,6 +13,8 @@ import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js"
 import type { AuthUser } from "../../shared/types/auth.js";
 import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
 import { normalizeProductName } from "../../shared/utils/productName.js";
+import { createBrand } from "../brands/brands.service.js";
+import { createClient } from "../clients/clients.service.js";
 import { createProduct } from "../products/products.service.js";
 import * as stockService from "../stock/stock.service.js";
 import type { SalesImportConfirmInput } from "./imports.validation.js";
@@ -44,8 +47,14 @@ export type ParsedSalesVoucher = {
 };
 
 export type SalesImportLinePreview = ParsedSalesLine & {
+  brandName: string;
+  brandCategory: "matched" | "new";
   category: "matched" | "unmatched";
   errors: string[];
+  matchedBrand?: {
+    id: string;
+    name: string;
+  };
   matchedProduct?: {
     id: string;
     name: string;
@@ -61,7 +70,13 @@ export type SalesImportVoucherPreview = {
   sellDate: string;
   clientName: string;
   invoiceNumber: string;
+  clientCategory: "matched" | "new";
   errors: string[];
+  matchedClient?: {
+    id: string;
+    name: string;
+    secondaryName?: string;
+  };
   lines: SalesImportLinePreview[];
 };
 
@@ -75,9 +90,13 @@ export type SalesImportResultLine = {
   productName: string;
   quantity: number;
   action?: "merge" | "create";
+  brandAction?: "merge" | "create";
+  mergeTargetBrandId?: string;
   mergeTargetProductId?: string;
   createBrandId?: string;
   productCreated?: boolean;
+  brandCreated?: boolean;
+  clientCreated?: boolean;
   status: "SUCCESS" | "FAILED" | "SKIPPED";
   message?: string;
 };
@@ -388,15 +407,28 @@ async function loadSalesImportContext() {
   const products = await Product.find({ isActive: true }).lean();
   const allProducts = await Product.find().lean();
   const brands = await Brand.find({ isActive: true }).sort({ name: 1 }).lean();
+  const allBrands = await Brand.find().lean();
+  const clients = await Client.find({ isActive: true }).sort({ name: 1 }).lean();
   const brandIdToName = new Map(brands.map((brand) => [String(brand._id), brand.name]));
+  const brandByName = new Map(
+    brands.map((brand) => [brand.name.trim().toLowerCase(), brand])
+  );
 
   return {
     products,
     allProducts,
+    brands,
+    allBrands,
+    brandByName,
     brandIdToName,
     existingBrands: brands.map((brand) => ({
       id: String(brand._id),
       name: brand.name,
+    })),
+    existingClients: clients.map((client) => ({
+      id: String(client._id),
+      name: client.name,
+      secondaryName: client.secondaryName,
     })),
     existingProducts: allProducts.map((product) => ({
       id: String(product._id),
@@ -412,13 +444,48 @@ async function loadSalesImportContext() {
   };
 }
 
+function inferBrandNameForSalesLine(
+  productName: string,
+  brandByName: Map<string, { _id: Types.ObjectId; name: string }>,
+  matchedProduct?: SalesImportLinePreview["matchedProduct"]
+): string {
+  if (matchedProduct?.brandName) return matchedProduct.brandName;
+
+  const trimmed = productName.trim();
+  if (!trimmed) return "";
+
+  const sortedBrands = Array.from(brandByName.values()).sort(
+    (a, b) => b.name.length - a.name.length
+  );
+  for (const brand of sortedBrands) {
+    const needle = brand.name.trim().toLowerCase();
+    if (trimmed.toLowerCase().endsWith(needle)) {
+      return brand.name;
+    }
+  }
+
+  const parts = trimmed.split(/\s+/);
+  return parts.length > 1 ? parts[parts.length - 1]! : "";
+}
+
 export async function previewSalesImport(fileBuffer: Buffer) {
   const parsedVouchers = parseSalesRegisterExcelBuffer(fileBuffer);
-  const { allProducts, brandIdToName, existingProducts, existingBrands } =
-    await loadSalesImportContext();
+  const {
+    allProducts,
+    brandByName,
+    brandIdToName,
+    existingProducts,
+    existingBrands,
+    existingClients,
+  } = await loadSalesImportContext();
+
+  const clientByName = new Map(
+    existingClients.map((client) => [client.name.trim().toLowerCase(), client])
+  );
 
   const vouchers: SalesImportVoucherPreview[] = parsedVouchers.map((voucher) => {
     const voucherErrors = validateVoucher(voucher);
+    const matchedClient = clientByName.get(voucher.clientName.trim().toLowerCase());
     const lines: SalesImportLinePreview[] = voucher.lines.map((line) => {
       const lineErrors = validateLineOnly(line);
       let matchedProduct: SalesImportLinePreview["matchedProduct"];
@@ -440,10 +507,25 @@ export async function previewSalesImport(fileBuffer: Buffer) {
         }
       }
 
+      const brandName = inferBrandNameForSalesLine(
+        line.productName,
+        brandByName,
+        matchedProduct
+      );
+      const matchedBrandRecord = brandName
+        ? brandByName.get(brandName.trim().toLowerCase())
+        : undefined;
+      const matchedBrand = matchedBrandRecord
+        ? { id: String(matchedBrandRecord._id), name: matchedBrandRecord.name }
+        : undefined;
+
       return {
         ...line,
+        brandName,
+        brandCategory: matchedBrand ? "matched" : "new",
         category: matchedProduct ? "matched" : "unmatched",
         errors: lineErrors,
+        matchedBrand,
         matchedProduct,
       };
     });
@@ -454,7 +536,9 @@ export async function previewSalesImport(fileBuffer: Buffer) {
       sellDate: voucher.sellDate,
       clientName: voucher.clientName,
       invoiceNumber: voucher.invoiceNumber,
+      clientCategory: matchedClient ? "matched" : "new",
       errors: voucherErrors,
+      matchedClient,
       lines,
     };
   });
@@ -469,6 +553,7 @@ export async function previewSalesImport(fileBuffer: Buffer) {
     vouchers,
     existingBrands,
     existingProducts,
+    existingClients,
   };
 }
 
@@ -476,8 +561,155 @@ function productCreateCacheKey(brandId: string, productName: string): string {
   return `${brandId}|${normalizeProductName(productName)}`;
 }
 
+async function resolveBrandForSalesLine(
+  line: {
+    brandName: string;
+    brandAction: "merge" | "create";
+    mergeTargetBrandId?: string;
+  },
+  user: AuthUser,
+  brands: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }>
+): Promise<{ brandId: string; created: boolean }> {
+  if (line.brandAction === "merge") {
+    const targetId = line.mergeTargetBrandId;
+    if (!targetId || !Types.ObjectId.isValid(targetId)) {
+      throw new BadRequestError("Select an existing brand to merge into");
+    }
+    let brand = brands.find((item) => String(item._id) === targetId);
+    if (!brand) {
+      const loaded = await Brand.findOne({ _id: targetId, isActive: true }).lean();
+      if (loaded) {
+        brand = loaded;
+        brands.push(loaded);
+      }
+    }
+    if (!brand) {
+      throw new NotFoundError("Brand not found");
+    }
+    return { brandId: String(brand._id), created: false };
+  }
+
+  const trimmed = line.brandName.trim();
+  if (!trimmed) {
+    throw new BadRequestError("Brand name is required to create a new brand");
+  }
+  const nameKey = trimmed.toLowerCase();
+
+  const existingActive = brands.find((item) => item.name.trim().toLowerCase() === nameKey);
+  if (existingActive) {
+    throw new BadRequestError(
+      `Brand "${trimmed}" already exists. Use "Use existing brand" to merge into it instead.`
+    );
+  }
+
+  const inactive = await Brand.findOne({
+    name: {
+      $regex: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+    },
+    isActive: false,
+  }).lean();
+  if (inactive) {
+    await Brand.updateOne({ _id: inactive._id }, { $set: { isActive: true } });
+    brands.push({ ...inactive, isActive: true });
+    return { brandId: String(inactive._id), created: false };
+  }
+
+  const created = await createBrand({ name: trimmed, isActive: true });
+  const brandDoc = await Brand.findById(created.id).lean();
+  if (!brandDoc) {
+    throw new NotFoundError("Brand not found after create");
+  }
+  brands.push(brandDoc);
+  await AuditLog.create({
+    action: "BRAND_CREATED",
+    entity: "Brand",
+    entityId: brandDoc._id,
+    userId: user.id,
+    metadata: { name: trimmed, source: "sales_import" },
+  });
+  return { brandId: created.id, created: true };
+}
+
+async function resolveClientForVoucher(
+  voucher: {
+    clientName: string;
+    clientAction: "merge" | "create";
+    mergeTargetClientId?: string;
+    clientSecondaryName?: string;
+  },
+  user: AuthUser,
+  clients: Array<{ _id: Types.ObjectId; name: string; secondaryName?: string }>
+): Promise<{ clientName: string; created: boolean }> {
+  if (voucher.clientAction === "merge") {
+    const targetId = voucher.mergeTargetClientId;
+    if (!targetId || !Types.ObjectId.isValid(targetId)) {
+      throw new BadRequestError("Select an existing client to merge into");
+    }
+    let client = clients.find((item) => String(item._id) === targetId);
+    if (!client) {
+      const loaded = await Client.findOne({ _id: targetId, isActive: true }).lean();
+      if (loaded) {
+        client = loaded;
+        clients.push(loaded);
+      }
+    }
+    if (!client) {
+      throw new NotFoundError("Client not found");
+    }
+    return { clientName: client.name, created: false };
+  }
+
+  const trimmed = voucher.clientName.trim();
+  if (!trimmed) {
+    throw new BadRequestError("Client name is required to create a new client");
+  }
+
+  const existing = await Client.findOne({
+    name: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+  }).lean();
+  if (existing) {
+    if (existing.isActive === false) {
+      await Client.updateOne(
+        { _id: existing._id },
+        {
+          $set: {
+            isActive: true,
+            ...(voucher.clientSecondaryName?.trim()
+              ? { secondaryName: voucher.clientSecondaryName.trim() }
+              : {}),
+          },
+        }
+      );
+      return { clientName: existing.name, created: false };
+    }
+    throw new BadRequestError(
+      `Client "${trimmed}" already exists. Use "Use existing client" to merge into it instead.`
+    );
+  }
+
+  const created = await createClient({
+    name: trimmed,
+    secondaryName: voucher.clientSecondaryName?.trim() || undefined,
+    isActive: true,
+  });
+  clients.push({
+    _id: new Types.ObjectId(created.id),
+    name: created.name,
+    secondaryName: created.secondaryName,
+  });
+  await AuditLog.create({
+    action: "CLIENT_CREATED",
+    entity: "Client",
+    entityId: created.id,
+    userId: user.id,
+    metadata: { name: trimmed, source: "sales_import" },
+  });
+  return { clientName: created.name, created: true };
+}
+
 async function resolveSalesImportLineProduct(
   line: SalesImportConfirmInput["vouchers"][number]["lines"][number],
+  brandId: string,
   createdCache: Map<string, string>,
   productById: Map<string, { _id: Types.ObjectId; brandId: Types.ObjectId; isActive?: boolean }>
 ): Promise<{ productId: string; brandId: string; created: boolean }> {
@@ -493,9 +725,8 @@ async function resolveSalesImportLineProduct(
     };
   }
 
-  const brandId = line.createBrandId!;
   if (!Types.ObjectId.isValid(brandId)) {
-    throw new BadRequestError("Invalid brand selected for new product");
+    throw new BadRequestError("Invalid brand for new product");
   }
 
   const cacheKey = productCreateCacheKey(brandId, line.productName);
@@ -563,6 +794,71 @@ async function deactivateImportedProducts(productIds: string[]): Promise<void> {
   );
 }
 
+type SalesImportVoucherLineValidation = {
+  baseLine: {
+    rowNumber: number;
+    voucherIndex: number;
+    headerRowNumber: number;
+    clientName: string;
+    invoiceNumber: string;
+    sellDate: string;
+    productName: string;
+    quantity: number;
+    brandName: string;
+    brandAction: "merge" | "create";
+    mergeTargetBrandId?: string;
+    action: "merge" | "create";
+    mergeTargetProductId?: string;
+  };
+  line: SalesImportConfirmInput["vouchers"][number]["lines"][number];
+  lineErrors: string[];
+};
+
+function rejectEntireVoucher(
+  baseVoucher: {
+    voucherIndex: number;
+    headerRowNumber: number;
+    clientName: string;
+    invoiceNumber: string;
+    sellDate: string;
+  },
+  validations: SalesImportVoucherLineValidation[],
+  invoiceMessage: string,
+  lineResults: SalesImportResultLine[],
+  voucherResults: SalesImportResultVoucher[]
+): number {
+  const lineFailures = validations
+    .filter((entry) => entry.lineErrors.length > 0)
+    .map(
+      (entry) => `Row ${entry.baseLine.rowNumber}: ${entry.lineErrors.join("; ")}`
+    );
+  const summary =
+    invoiceMessage ||
+    (lineFailures.length > 0
+      ? `One or more products failed — entire invoice rejected. ${lineFailures.join(" · ")}`
+      : "Entire invoice rejected — no stock out recorded");
+
+  for (const entry of validations) {
+    const message =
+      entry.lineErrors.length > 0
+        ? entry.lineErrors.join("; ")
+        : `Invoice rejected — entire stock out skipped. ${summary}`;
+    lineResults.push({
+      ...entry.baseLine,
+      status: "FAILED",
+      message,
+    });
+  }
+
+  voucherResults.push({
+    ...baseVoucher,
+    status: "FAILED",
+    message: summary,
+  });
+
+  return validations.length;
+}
+
 export async function confirmSalesImport(input: SalesImportConfirmInput, user: AuthUser) {
   const lineCount = input.vouchers.reduce((sum, voucher) => sum + voucher.lines.length, 0);
   assertImportRowCount(lineCount, "Sales import confirm");
@@ -580,97 +876,108 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
   const { allProducts } = await loadSalesImportContext();
   const productById = new Map(allProducts.map((product) => [String(product._id), product]));
   const createdProductCache = new Map<string, string>();
+  const brandDocs: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }> = [];
+  const clientDocs: Array<{ _id: Types.ObjectId; name: string; secondaryName?: string }> = [];
 
   const lineResults: SalesImportResultLine[] = [];
   const voucherResults: SalesImportResultVoucher[] = [];
   let successCount = 0;
   let failedCount = 0;
   let createdProductCount = 0;
+  let createdBrandCount = 0;
+  let createdClientCount = 0;
 
   for (const voucher of input.vouchers) {
-    const baseVoucher = {
+    const draftVoucher = {
       voucherIndex: voucher.voucherIndex,
       headerRowNumber: voucher.headerRowNumber,
       clientName: voucher.clientName.trim(),
+      clientSecondaryName: voucher.clientSecondaryName?.trim(),
       invoiceNumber: voucher.invoiceNumber.trim(),
       sellDate: voucher.sellDate?.trim() ?? "",
+      clientAction: voucher.clientAction,
+      mergeTargetClientId: voucher.mergeTargetClientId,
     };
 
     const voucherErrors: string[] = [];
-    if (!baseVoucher.clientName) voucherErrors.push("Client name is required");
-    if (!baseVoucher.invoiceNumber) voucherErrors.push("Invoice number is required");
+    if (!draftVoucher.clientName) voucherErrors.push("Client name is required");
+    if (!draftVoucher.invoiceNumber) voucherErrors.push("Invoice number is required");
     if (voucher.lines.length === 0) voucherErrors.push("No product lines to import");
+    if (draftVoucher.clientAction === "merge" && !draftVoucher.mergeTargetClientId) {
+      voucherErrors.push("Select a client to merge into");
+    }
 
-    const batchItems: Array<{ productId: string; brandId: string; quantity: number }> = [];
-    const pendingLines: Array<{
-      baseLine: {
-        rowNumber: number;
-        voucherIndex: number;
-        headerRowNumber: number;
-        clientName: string;
-        invoiceNumber: string;
-        sellDate: string;
-        productName: string;
-        quantity: number;
-        action: "merge" | "create";
-        mergeTargetProductId?: string;
-        createBrandId?: string;
-      };
-      line: (typeof voucher.lines)[number];
-    }> = [];
-    let voucherFailedLines = 0;
+    let resolvedClientName = draftVoucher.clientName;
 
-    for (const line of voucher.lines) {
+    if (voucherErrors.length === 0) {
+      try {
+        const resolvedClient = await resolveClientForVoucher(draftVoucher, user, clientDocs);
+        resolvedClientName = resolvedClient.clientName;
+        if (resolvedClient.created) {
+          createdClientCount++;
+        }
+      } catch (err) {
+        voucherErrors.push(err instanceof Error ? err.message : "Client resolution failed");
+      }
+    }
+
+    const baseVoucher = {
+      voucherIndex: draftVoucher.voucherIndex,
+      headerRowNumber: draftVoucher.headerRowNumber,
+      clientName: resolvedClientName,
+      invoiceNumber: draftVoucher.invoiceNumber,
+      sellDate: draftVoucher.sellDate,
+    };
+
+    const lineValidations: SalesImportVoucherLineValidation[] = voucher.lines.map((line) => {
       const baseLine = {
         rowNumber: line.rowNumber,
         ...baseVoucher,
         productName: line.productName.trim(),
         quantity: line.quantity,
+        brandName: line.brandName.trim(),
+        brandAction: line.brandAction,
+        mergeTargetBrandId: line.mergeTargetBrandId,
         action: line.action,
         mergeTargetProductId: line.mergeTargetProductId,
-        createBrandId: line.createBrandId,
       };
 
       const lineErrors = [...voucherErrors];
       if (!baseLine.productName) lineErrors.push("Product name is required");
+      if (!baseLine.brandName) lineErrors.push("Brand name is required");
       if (!Number.isFinite(baseLine.quantity) || baseLine.quantity < 1) {
         lineErrors.push("Quantity must be at least 1 unit");
+      }
+      if (line.brandAction === "merge" && !line.mergeTargetBrandId) {
+        lineErrors.push("Select a brand to merge into");
       }
       if (line.action === "merge" && !line.mergeTargetProductId) {
         lineErrors.push("Select a product to merge into");
       }
-      if (line.action === "create" && !line.createBrandId) {
-        lineErrors.push("Select a brand for the new product");
-      }
 
-      if (lineErrors.length > 0) {
-        lineResults.push({
-          ...baseLine,
-          status: "FAILED",
-          message: lineErrors.join("; "),
-        });
-        failedCount++;
-        voucherFailedLines++;
-        continue;
-      }
+      return { baseLine, line, lineErrors };
+    });
 
-      pendingLines.push({ baseLine, line });
-
-      lineResults.push({
-        ...baseLine,
-        status: "SKIPPED",
-        message: "Pending voucher import",
-      });
-    }
-
-    if (voucherErrors.length > 0 || pendingLines.length === 0) {
+    if (lineValidations.length === 0) {
       voucherResults.push({
         ...baseVoucher,
         status: "FAILED",
-        message:
-          voucherErrors.join("; ") ||
-          (pendingLines.length === 0 ? "No valid product lines for this invoice" : undefined),
+        message: "No product lines to import",
       });
+      continue;
+    }
+
+    const hasValidationFailure = lineValidations.some(
+      (entry) => entry.lineErrors.length > 0
+    );
+    if (hasValidationFailure) {
+      failedCount += rejectEntireVoucher(
+        baseVoucher,
+        lineValidations,
+        "",
+        lineResults,
+        voucherResults
+      );
       continue;
     }
 
@@ -682,21 +989,14 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       clientName: exactCaseInsensitiveRegex(baseVoucher.clientName),
     });
     if (duplicateInvoice) {
-      voucherResults.push({
-        ...baseVoucher,
-        status: "FAILED",
-        message: `Invoice ${baseVoucher.invoiceNumber} for ${baseVoucher.clientName} was already imported at this warehouse`,
-      });
-      for (const lineResult of lineResults) {
-        if (
-          lineResult.voucherIndex === baseVoucher.voucherIndex &&
-          lineResult.status === "SKIPPED"
-        ) {
-          lineResult.status = "FAILED";
-          lineResult.message = "Duplicate invoice — skipped";
-          failedCount++;
-        }
-      }
+      const duplicateMessage = `Invoice ${baseVoucher.invoiceNumber} for ${baseVoucher.clientName} was already imported at this warehouse`;
+      failedCount += rejectEntireVoucher(
+        baseVoucher,
+        lineValidations,
+        duplicateMessage,
+        lineResults,
+        voucherResults
+      );
       continue;
     }
 
@@ -709,9 +1009,25 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     const voucherCreatedProductIds: string[] = [];
 
     try {
-      for (const { baseLine, line } of pendingLines) {
+      const batchItems: Array<{ productId: string; brandId: string; quantity: number }> = [];
+
+      for (const { baseLine, line } of lineValidations) {
+        const resolvedBrand = await resolveBrandForSalesLine(
+          {
+            brandName: baseLine.brandName,
+            brandAction: line.brandAction,
+            mergeTargetBrandId: line.mergeTargetBrandId,
+          },
+          user,
+          brandDocs
+        );
+        if (resolvedBrand.created) {
+          createdBrandCount++;
+        }
+
         const resolvedProduct = await resolveSalesImportLineProduct(
           line,
+          resolvedBrand.brandId,
           createdProductCache,
           productById
         );
@@ -736,16 +1052,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
           brandId: resolvedProduct.brandId,
           quantity: baseLine.quantity,
         });
-
-        const pendingResult = lineResults.find(
-          (row) =>
-            row.voucherIndex === baseVoucher.voucherIndex &&
-            row.rowNumber === baseLine.rowNumber &&
-            row.status === "SKIPPED"
-        );
-        if (pendingResult) {
-          pendingResult.productCreated = resolvedProduct.created;
-        }
       }
 
       const mergedItems = mergeBatchItems(batchItems);
@@ -756,7 +1062,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
           clientName: baseVoucher.clientName,
           invoiceNumber: baseVoucher.invoiceNumber,
           notes,
-          allowInsufficientStock: true,
           items: mergedItems.map((item) => ({
             brandId: item.brandId,
             productId: item.productId,
@@ -766,45 +1071,30 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         user
       );
 
-      for (const lineResult of lineResults) {
-        if (
-          lineResult.voucherIndex === baseVoucher.voucherIndex &&
-          lineResult.status === "SKIPPED" &&
-          lineResult.message?.startsWith("Pending voucher import")
-        ) {
-          lineResult.status = "SUCCESS";
-          lineResult.message = `Stock out recorded (${batchResult.clientName})`;
-          successCount++;
-        }
+      for (const { baseLine } of lineValidations) {
+        lineResults.push({
+          ...baseLine,
+          status: "SUCCESS",
+          message: `Stock out recorded (${batchResult.clientName})`,
+        });
+        successCount++;
       }
 
       voucherResults.push({
         ...baseVoucher,
-        status: voucherFailedLines > 0 ? "PARTIAL" : "SUCCESS",
+        status: "SUCCESS",
         movementCount: batchResult.movements.length,
-        message:
-          voucherFailedLines > 0
-            ? `${voucherFailedLines} line(s) failed; remaining lines imported`
-            : undefined,
       });
     } catch (err) {
       await deactivateImportedProducts(voucherCreatedProductIds);
       const message = err instanceof Error ? err.message : "Stock out failed";
-      for (const lineResult of lineResults) {
-        if (
-          lineResult.voucherIndex === baseVoucher.voucherIndex &&
-          lineResult.status === "SKIPPED"
-        ) {
-          lineResult.status = "FAILED";
-          lineResult.message = message;
-          failedCount++;
-        }
-      }
-      voucherResults.push({
-        ...baseVoucher,
-        status: "FAILED",
+      failedCount += rejectEntireVoucher(
+        baseVoucher,
+        lineValidations,
         message,
-      });
+        lineResults,
+        voucherResults
+      );
     }
   }
 
@@ -820,6 +1110,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       successCount,
       failedCount,
       createdProductCount,
+      createdBrandCount,
+      createdClientCount,
     },
   });
 
@@ -835,6 +1127,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     successCount,
     failedCount,
     createdProductCount,
+    createdBrandCount,
+    createdClientCount,
     vouchers: voucherResults,
     rows: lineResults,
   };

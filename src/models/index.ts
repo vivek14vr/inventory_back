@@ -1,5 +1,6 @@
 export { Warehouse, type IWarehouse } from "./Warehouse.js";
 export { Brand, type IBrand } from "./Brand.js";
+export { Client, type IClient } from "./Client.js";
 export { Product, type IProduct } from "./Product.js";
 export { User, type IUser } from "./User.js";
 export { InventoryBalance, type IInventoryBalance } from "./InventoryBalance.js";

@@ -67,8 +67,6 @@ export const stockOutBatchSchema = z
     clientName: z.string().min(1, "Client name is required").max(200),
     invoiceNumber: z.string().max(100).optional(),
     notes: z.string().max(500).optional(),
-    /** When true, records stock out even if warehouse balance is insufficient (historical import). */
-    allowInsufficientStock: z.boolean().optional(),
     items: z
       .array(
         z.object({

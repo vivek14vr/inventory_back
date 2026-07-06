@@ -11,6 +11,10 @@ import {
   CLIENT_RETURN_PERMISSIONS,
 } from "../../shared/constants/permissions.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../shared/errors/AppError.js";
+import {
+  assertNonNegativeIntegerQuantity,
+  assertPositiveIntegerQuantity,
+} from "../../shared/validation/quantity.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
 import { buildStockMovementAuditMetadata } from "../../shared/utils/auditMetadata.js";
@@ -36,8 +40,8 @@ type SaleMovementDoc = {
   invoiceNumber?: string;
   clientName?: string;
   warehouseId: Types.ObjectId;
-  productId: Types.ObjectId;
-  brandId: Types.ObjectId;
+  productId: Types.ObjectId | { _id: Types.ObjectId };
+  brandId: Types.ObjectId | { _id: Types.ObjectId };
   createdAt: Date;
   productIdPop?: {
     _id: Types.ObjectId;
@@ -140,6 +144,16 @@ function normalizeClient(value: string): string {
   return value.trim();
 }
 
+function refId(
+  value: Types.ObjectId | { _id: Types.ObjectId } | string | null | undefined
+): string {
+  if (!value) return "";
+  if (typeof value === "object" && "_id" in value) {
+    return String(value._id);
+  }
+  return String(value);
+}
+
 function saleWarehouseId(
   sale: Pick<SaleMovementDoc, "warehouseId"> | { warehouseId: unknown }
 ): string {
@@ -176,8 +190,10 @@ async function sumReturnedQuantity(
       _id: sale._id,
       invoiceNumber: sale.invoiceNumber,
       clientName: sale.clientName,
-      productId: sale.productId,
-      warehouseId: sale.warehouseIdPop?._id ?? sale.warehouseId,
+      productId: new Types.ObjectId(refId(sale.productId)),
+      warehouseId: new Types.ObjectId(
+        refId(sale.warehouseIdPop?._id ?? sale.warehouseId)
+      ),
     },
     session
   );
@@ -194,10 +210,10 @@ async function mapSaleToLine(
 
   return {
     saleMovementId: String(sale._id),
-    productId: String(sale.productId),
+    productId: refId(sale.productId),
     productName: product?.name ?? "Unknown product",
     secondaryProductName: product?.secondaryName,
-    brandId: String(sale.brandId),
+    brandId: refId(sale.brandId),
     brandName: brand?.name ?? "",
     stockUnit: product?.stockUnit,
     unitsPerStockUnit: product?.unitsPerStockUnit,
@@ -570,7 +586,8 @@ async function createReturnMovement(
   session: ClientSession | null
 ) {
   const warehouseId = saleWarehouseId(sale);
-  const productId = String(sale.productId);
+  const productId = refId(sale.productId);
+  const brandId = refId(sale.brandId);
 
   const warehouse = await Warehouse.findById(warehouseId).session(session).lean();
   if (!warehouse || warehouse.isActive === false) {
@@ -588,9 +605,9 @@ async function createReturnMovement(
     [
       {
         type: StockMovementType.STOCK_IN,
-        warehouseId: sale.warehouseIdPop?._id ?? sale.warehouseId,
-        productId: sale.productId,
-        brandId: sale.brandId,
+        warehouseId: sale.warehouseIdPop?._id ?? new Types.ObjectId(refId(sale.warehouseId)),
+        productId: new Types.ObjectId(productId),
+        brandId: new Types.ObjectId(brandId),
         quantity,
         clientName: sale.clientName,
         invoiceNumber: sale.invoiceNumber,
@@ -647,6 +664,7 @@ async function returnSaleLine(
 
   const returned = await sumReturnedQuantity(sale, session);
   const returnable = sale.quantity - returned;
+  assertPositiveIntegerQuantity(quantity, "Return quantity");
   if (quantity > returnable) {
     throw new BadRequestError(
       `Cannot return ${quantity} — only ${returnable} remaining on this line`
@@ -666,11 +684,12 @@ export async function submitClientReturn(input: ClientReturnSubmitInput, user: A
     if (input.quantity === undefined) {
       throw new BadRequestError("quantity is required");
     }
+    assertNonNegativeIntegerQuantity(input.quantity, "Sold quantity");
 
     const sale = await loadSaleMovement(input.saleMovementId);
     const previousQuantity = sale.quantity;
     const warehouseId = saleWarehouseId(sale);
-    const productId = String(sale.productId);
+    const productId = refId(sale.productId);
 
     assertCanReturnAtWarehouse(user, warehouseId);
 

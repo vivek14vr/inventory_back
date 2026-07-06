@@ -2,6 +2,10 @@ import mongoose, { Types } from "mongoose";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
+import {
+  assertNonNegativeIntegerQuantity,
+  assertPositiveIntegerQuantity,
+} from "../../shared/validation/quantity.js";
 
 export async function getBalance(
   warehouseId: string,
@@ -18,11 +22,16 @@ export async function adjustBalance(
   warehouseId: string,
   productId: string,
   delta: number,
-  session?: mongoose.ClientSession | null,
-  options?: { allowNegative?: boolean }
+  session?: mongoose.ClientSession | null
 ): Promise<number> {
   if (delta === 0) {
     return getBalance(warehouseId, productId, session);
+  }
+
+  if (delta < 0) {
+    assertPositiveIntegerQuantity(Math.abs(delta), "Stock change");
+  } else {
+    assertPositiveIntegerQuantity(delta, "Stock change");
   }
 
   // Guarded, atomic decrement: only succeeds when enough stock exists. This
@@ -30,23 +39,18 @@ export async function adjustBalance(
   // read-then-write check and overselling (important on standalone MongoDB
   // where multi-document transactions are unavailable).
   if (delta < 0) {
-    const updated = options?.allowNegative
-      ? await InventoryBalance.findOneAndUpdate(
-          { warehouseId, productId },
-          { $inc: { quantity: delta } },
-          { new: true, upsert: true, ...(session ? { session } : {}) }
-        )
-      : await InventoryBalance.findOneAndUpdate(
-          { warehouseId, productId, quantity: { $gte: -delta } },
-          { $inc: { quantity: delta } },
-          { new: true, ...(session ? { session } : {}) }
-        );
+    const updated = await InventoryBalance.findOneAndUpdate(
+      { warehouseId, productId, quantity: { $gte: -delta } },
+      { $inc: { quantity: delta } },
+      { new: true, ...(session ? { session } : {}) }
+    );
     if (!updated) {
       const current = await getBalance(warehouseId, productId, session);
       throw new BadRequestError(
         `Insufficient stock. Available: ${current}, requested: ${Math.abs(delta)}`
       );
     }
+    assertNonNegativeIntegerQuantity(updated.quantity, "Stock balance");
     return updated.quantity;
   }
 
@@ -56,7 +60,9 @@ export async function adjustBalance(
     { $inc: { quantity: delta } },
     { new: true, upsert: true, ...(session ? { session } : {}) }
   );
-  return updated?.quantity ?? delta;
+  const next = updated?.quantity ?? delta;
+  assertNonNegativeIntegerQuantity(next, "Stock balance");
+  return next;
 }
 
 export async function setBalance(
@@ -65,9 +71,7 @@ export async function setBalance(
   quantity: number,
   session?: mongoose.ClientSession | null
 ): Promise<{ previous: number; next: number; delta: number }> {
-  if (quantity < 0) {
-    throw new BadRequestError("Quantity cannot be negative");
-  }
+  assertNonNegativeIntegerQuantity(quantity, "Quantity");
 
   // Atomic absolute set; returns the pre-update document so we can report the
   // previous quantity and delta without a separate racy read.
@@ -86,6 +90,7 @@ export async function assertSufficientStock(
   quantity: number,
   session?: mongoose.ClientSession | null
 ): Promise<void> {
+  assertPositiveIntegerQuantity(quantity, "Requested quantity");
   const available = await getBalance(warehouseId, productId, session);
   if (available < quantity) {
     throw new BadRequestError(

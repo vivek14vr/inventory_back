@@ -32,41 +32,81 @@ export const productImportConfirmSchema = z.object({
 export type ProductImportConfirmInput = z.infer<typeof productImportConfirmSchema>;
 export type ProductImportConfirmRow = z.infer<typeof productImportConfirmRowSchema>;
 
-export const salesImportConfirmLineSchema = z
+export const clientImportConfirmRowSchema = z
   .object({
     rowNumber: z.number().int().min(1),
-    productName: z.string().min(1).max(200),
-    quantity: z.coerce.number().int().min(1),
+    primaryName: z.string().min(1).max(200),
+    secondaryName: z.string().max(200).optional(),
     action: z.enum(["merge", "create"]),
-    mergeTargetProductId: z.string().optional(),
-    createBrandId: z.string().optional(),
+    mergeTargetClientId: z.string().optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.action === "merge") {
-      if (!data.mergeTargetProductId) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Select a product to merge into",
-          path: ["mergeTargetProductId"],
-        });
-      }
-    } else if (!data.createBrandId) {
+    if (data.action === "merge" && !data.mergeTargetClientId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Select a brand for the new product",
-        path: ["createBrandId"],
+        message: "Select a client to merge into",
+        path: ["mergeTargetClientId"],
       });
     }
   });
 
-export const salesImportConfirmVoucherSchema = z.object({
-  voucherIndex: z.number().int().min(1),
-  headerRowNumber: z.number().int().min(1),
-  sellDate: z.string().max(50).optional(),
-  clientName: z.string().min(1).max(200),
-  invoiceNumber: z.string().min(1).max(100),
-  lines: z.array(salesImportConfirmLineSchema).min(1),
+export const clientImportConfirmSchema = z.object({
+  fileName: z.string().max(255).optional(),
+  rows: z.array(clientImportConfirmRowSchema).min(1),
 });
+
+export type ClientImportConfirmInput = z.infer<typeof clientImportConfirmSchema>;
+export type ClientImportConfirmRow = z.infer<typeof clientImportConfirmRowSchema>;
+
+export const salesImportConfirmLineSchema = z
+  .object({
+    rowNumber: z.number().int().min(1),
+    productName: z.string().min(1).max(200),
+    brandName: z.string().min(1).max(200),
+    quantity: z.coerce.number().int().min(1),
+    brandAction: z.enum(["merge", "create"]),
+    mergeTargetBrandId: z.string().optional(),
+    action: z.enum(["merge", "create"]),
+    mergeTargetProductId: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.brandAction === "merge" && !data.mergeTargetBrandId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Select a brand to merge into",
+        path: ["mergeTargetBrandId"],
+      });
+    }
+    if (data.action === "merge" && !data.mergeTargetProductId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Select a product to merge into",
+        path: ["mergeTargetProductId"],
+      });
+    }
+  });
+
+export const salesImportConfirmVoucherSchema = z
+  .object({
+    voucherIndex: z.number().int().min(1),
+    headerRowNumber: z.number().int().min(1),
+    sellDate: z.string().max(50).optional(),
+    clientName: z.string().min(1).max(200),
+    clientSecondaryName: z.string().max(200).optional(),
+    invoiceNumber: z.string().min(1).max(100),
+    clientAction: z.enum(["merge", "create"]),
+    mergeTargetClientId: z.string().optional(),
+    lines: z.array(salesImportConfirmLineSchema).min(1),
+  })
+  .superRefine((data, ctx) => {
+    if (data.clientAction === "merge" && !data.mergeTargetClientId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Select a client to merge into",
+        path: ["mergeTargetClientId"],
+      });
+    }
+  });
 
 export const salesImportConfirmSchema = z.object({
   fileName: z.string().max(255).optional(),

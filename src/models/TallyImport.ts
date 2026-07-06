@@ -24,7 +24,7 @@ const tallyImportRowSchema = new Schema<ITallyImportRow>(
   {
     productName: { type: String, required: true },
     brandName: { type: String, required: true },
-    quantity: { type: Number, required: true },
+    quantity: { type: Number, required: true, min: 0 },
     status: { type: String, enum: ["SUCCESS", "FAILED", "SKIPPED"], required: true },
     message: { type: String },
   },

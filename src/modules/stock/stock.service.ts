@@ -715,15 +715,13 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
       }
     }
 
-    if (!input.allowInsufficientStock) {
-      for (const line of validatedLines) {
-        await inventoryService.assertSufficientStock(
-          warehouseId,
-          String(line.productId),
-          line.quantity,
-          session
-        );
-      }
+    for (const line of validatedLines) {
+      await inventoryService.assertSufficientStock(
+        warehouseId,
+        String(line.productId),
+        line.quantity,
+        session
+      );
     }
 
     const movementIds: Types.ObjectId[] = [];
@@ -734,8 +732,7 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
         warehouseId,
         String(line.productId),
         -line.quantity,
-        session,
-        { allowNegative: input.allowInsufficientStock }
+        session
       );
       balances[String(line.productId)] = newQty;
 

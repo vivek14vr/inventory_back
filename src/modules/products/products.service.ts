@@ -1,5 +1,6 @@
 import { Types } from "mongoose";
 import { Brand } from "../../models/Brand.js";
+import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
 import {
   BadRequestError,
@@ -171,6 +172,14 @@ export async function listProducts(query: ListProductsQuery) {
     }));
   }
 
+  if (query.includeStockTotals) {
+    const stockTotals = await getProductStockTotals(items.map((item) => item.id));
+    items = items.map((item) => ({
+      ...item,
+      totalStock: stockTotals.get(item.id) ?? 0,
+    }));
+  }
+
   return {
     items,
     pagination: buildPaginationMeta(total, page, limit),
@@ -306,4 +315,72 @@ export async function updateProduct(id: string, input: UpdateProductInput) {
     }
     throw err;
   }
+}
+
+export async function getProductStockTotals(
+  productIds: string[]
+): Promise<Map<string, number>> {
+  const validIds = productIds
+    .filter((id) => Types.ObjectId.isValid(id))
+    .map((id) => new Types.ObjectId(id));
+
+  const totals = new Map<string, number>();
+  if (validIds.length === 0) return totals;
+
+  const rows = await InventoryBalance.aggregate<{ _id: Types.ObjectId; total: number }>([
+    { $match: { productId: { $in: validIds } } },
+    { $group: { _id: "$productId", total: { $sum: "$quantity" } } },
+  ]);
+
+  for (const row of rows) {
+    totals.set(String(row._id), row.total);
+  }
+  return totals;
+}
+
+async function assertProductHasZeroStock(productId: string): Promise<void> {
+  const balances = await InventoryBalance.find({
+    productId,
+    quantity: { $gt: 0 },
+  })
+    .populate("warehouseId", "name code")
+    .lean();
+
+  if (balances.length === 0) return;
+
+  const parts = balances.map((balance) => {
+    const warehouse = balance.warehouseId as {
+      name?: string;
+      code?: string;
+    } | null;
+    const label = warehouse?.name ?? warehouse?.code ?? "warehouse";
+    return `${balance.quantity} at ${label}`;
+  });
+
+  throw new BadRequestError(
+    `Cannot delete product while stock remains (${parts.join("; ")})`
+  );
+}
+
+/** Soft-delete a product when total stock is zero at every warehouse. */
+export async function deleteProduct(id: string) {
+  if (!Types.ObjectId.isValid(id)) {
+    throw new NotFoundError("Product not found");
+  }
+
+  const product = await Product.findById(id);
+  if (!product) {
+    throw new NotFoundError("Product not found");
+  }
+
+  await assertProductHasZeroStock(id);
+
+  product.isActive = false;
+  await product.save();
+
+  const populated = await Product.findById(product._id)
+    .populate("brandId", "name isActive")
+    .lean();
+
+  return toPublicProduct(populated as ProductDoc);
 }

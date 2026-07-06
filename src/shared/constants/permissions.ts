@@ -23,6 +23,9 @@ export const Permission = {
   BRANDS_VIEW: "brands.view",
   BRANDS_MANAGE: "brands.manage",
 
+  CLIENTS_VIEW: "clients.view",
+  CLIENTS_MANAGE: "clients.manage",
+
   PRODUCTS_VIEW: "products.view",
   PRODUCTS_MANAGE: "products.manage",
 
@@ -225,6 +228,26 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
         label: "Create & edit brands",
         description: "Add, rename, or deactivate brands.",
         example: "Add brand “Acme” or deactivate a discontinued line.",
+      },
+    ],
+  },
+  {
+    id: "clients",
+    label: "Clients",
+    description: "Customer master list with primary and secondary names.",
+    warehouseScoped: false,
+    permissions: [
+      {
+        code: Permission.CLIENTS_VIEW,
+        label: "View clients",
+        description: "See the client list and details.",
+        example: "Browse clients before recording a direct sale.",
+      },
+      {
+        code: Permission.CLIENTS_MANAGE,
+        label: "Create & edit clients",
+        description: "Add, rename, or deactivate clients.",
+        example: "Add client “Acme Corp” with secondary name “Acme Mumbai”.",
       },
     ],
   },

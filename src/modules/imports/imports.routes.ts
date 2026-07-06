@@ -7,9 +7,11 @@ import { requireAdminOrPermission } from "../../shared/middleware/requirePermiss
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as importsService from "./imports.service.js";
+import * as clientImportService from "./clientImport.service.js";
 import * as productImportService from "./productImport.service.js";
 import * as salesImportService from "./salesImport.service.js";
 import {
+  clientImportConfirmSchema,
   productImportConfirmSchema,
   salesImportConfirmSchema,
 } from "./imports.validation.js";
@@ -75,6 +77,28 @@ router.post(
   asyncHandler(async (req, res) => {
     const input = productImportConfirmSchema.parse(req.body);
     const result = await productImportService.confirmProductImport(input, req.user!);
+    sendSuccess(res, result, 201);
+  })
+);
+
+router.post(
+  "/clients/preview",
+  upload.single("file"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      throw new BadRequestError("Excel file is required");
+    }
+
+    const preview = await clientImportService.previewClientImport(req.file.buffer);
+    sendSuccess(res, preview);
+  })
+);
+
+router.post(
+  "/clients/confirm",
+  asyncHandler(async (req, res) => {
+    const input = clientImportConfirmSchema.parse(req.body);
+    const result = await clientImportService.confirmClientImport(input, req.user!);
     sendSuccess(res, result, 201);
   })
 );

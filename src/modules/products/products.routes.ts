@@ -41,9 +41,12 @@ router.get(
       hasPermission(req.user!, Permission.PRODUCTS_MANAGE);
     const includeInactive =
       canManage && req.query.includeInactive === "true";
+    const includeStockTotals =
+      canManage && req.query.includeStockTotals === "true";
     const parsed = listProductsQuerySchema.safeParse({
       ...req.query,
       includeInactive: includeInactive ? "true" : "false",
+      includeStockTotals: includeStockTotals ? "true" : "false",
     });
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
@@ -120,6 +123,16 @@ router.patch(
       String(req.params.id),
       parsed.data
     );
+    sendSuccess(res, product);
+  })
+);
+
+router.delete(
+  "/:id",
+  authenticate,
+  requireAdminOrPermission(Permission.PRODUCTS_MANAGE),
+  asyncHandler(async (req, res) => {
+    const product = await productsService.deleteProduct(String(req.params.id));
     sendSuccess(res, product);
   })
 );
