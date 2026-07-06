@@ -14,6 +14,7 @@ export interface IStockMovement extends Document {
   clientName?: string;
   invoiceNumber?: string;
   transferId?: Types.ObjectId;
+  relatedSaleMovementId?: Types.ObjectId;
   destinationWarehouseId?: Types.ObjectId;
   notes?: string;
   invoiceLastWorkedAt?: Date;
@@ -33,6 +34,7 @@ const stockMovementSchema = new Schema<IStockMovement>(
     invoiceNumber: { type: String, trim: true },
     invoiceLastWorkedAt: { type: Date },
     transferId: { type: Schema.Types.ObjectId, ref: "Transfer" },
+    relatedSaleMovementId: { type: Schema.Types.ObjectId, ref: "StockMovement" },
     destinationWarehouseId: { type: Schema.Types.ObjectId, ref: "Warehouse" },
     notes: { type: String, trim: true },
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },

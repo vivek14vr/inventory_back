@@ -8,7 +8,7 @@ export const stockFiltersSchema = z.object({
   includeZero: z
     .enum(["true", "false"])
     .optional()
-    .transform((v) => v === "true"),
+    .transform((v) => (v === undefined ? true : v === "true")),
 });
 
 export const stockQuerySchema = paginationQuerySchema.extend({
@@ -18,7 +18,7 @@ export const stockQuerySchema = paginationQuerySchema.extend({
   includeZero: z
     .enum(["true", "false"])
     .optional()
-    .transform((v) => v === "true"),
+    .transform((v) => (v === undefined ? true : v === "true")),
   sortBy: z
     .enum(["quantity", "productName", "brandName", "warehouseName", "updatedAt"])
     .optional()

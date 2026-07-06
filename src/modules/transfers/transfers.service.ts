@@ -195,6 +195,7 @@ export async function listPendingTransfers(
     .populate("brandId", "name")
     .populate("sourceWarehouseId", "name code")
     .populate("destinationWarehouseId", "name code")
+    .populate("createdBy", "name")
     .lean();
 
   return transfers.map((t) => mapTransfer(t));
@@ -702,6 +703,124 @@ export async function returnTransfer(
             extra: {
               sourceBalance,
               destinationBalance: destBalance,
+              notes: input.notes,
+            },
+          }),
+        },
+      ],
+      dbSession(session)
+    );
+
+    const updated = await Transfer.findById(transferId)
+      .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
+      .populate("brandId", "name")
+      .populate("sourceWarehouseId", "name code")
+      .populate("destinationWarehouseId", "name code")
+      .populate("createdBy", "name")
+      .populate("receivedBy", "name")
+      .populate("returnedBy", "name")
+      .lean();
+
+    return mapTransfer(updated!);
+  });
+}
+
+function assertCanReturnInTransit(user: AuthUser, transfer: {
+  sourceWarehouseId: Types.ObjectId;
+  destinationWarehouseId: Types.ObjectId;
+}) {
+  if (isAdmin(user)) return;
+  const sourceId = String(transfer.sourceWarehouseId);
+  const destId = String(transfer.destinationWarehouseId);
+  const allowed =
+    hasPermission(user, Permission.TRANSFERS_MANAGE, sourceId) ||
+    hasPermission(user, Permission.TRANSFERS_MANAGE, destId) ||
+    hasPermission(user, Permission.TRANSFERS_RECEIVE, destId) ||
+    hasPermission(user, Permission.STOCK_IN, destId);
+  if (!allowed) {
+    throw new ForbiddenError("You do not have permission to return this in-transit transfer");
+  }
+}
+
+/** Return goods still in transit — restores stock at the source warehouse. */
+export async function returnInTransitTransfer(
+  transferId: string,
+  input: { notes?: string },
+  user: AuthUser
+) {
+  if (!Types.ObjectId.isValid(transferId)) {
+    throw new BadRequestError("Invalid transfer ID");
+  }
+
+  return runInTransaction(async (session) => {
+    const transfer = await Transfer.findById(transferId).session(session ?? null);
+    if (!transfer) {
+      throw new NotFoundError("Transfer not found");
+    }
+
+    if (transfer.status !== TransferStatus.PENDING) {
+      throw new BadRequestError(
+        `Only in-transit transfers can be returned (current: ${transfer.status})`
+      );
+    }
+
+    assertCanReturnInTransit(user, transfer);
+
+    const newQty = await balanceService.adjustBalance(
+      String(transfer.sourceWarehouseId),
+      String(transfer.productId),
+      transfer.quantity,
+      session
+    );
+
+    const note =
+      input.notes?.trim() ||
+      "Goods returned to source — transfer cancelled while in transit";
+
+    const [reversalMovement] = await StockMovement.create(
+      [
+        {
+          type: StockMovementType.STOCK_IN,
+          warehouseId: transfer.sourceWarehouseId,
+          productId: transfer.productId,
+          brandId: transfer.brandId,
+          quantity: transfer.quantity,
+          transferId: transfer._id,
+          notes: note,
+          createdBy: user.id,
+        },
+      ],
+      dbSession(session)
+    );
+
+    transfer.status = TransferStatus.CANCELLED;
+    transfer.stockReturnInMovementId = reversalMovement._id;
+    transfer.returnNotes = note;
+    transfer.returnedBy = new Types.ObjectId(user.id);
+    transfer.returnedAt = new Date();
+    await transfer.save(dbSession(session));
+
+    const snapshot = await transferAuditSnapshot(transfer._id, session);
+
+    await AuditLog.create(
+      [
+        {
+          action: "TRANSFER_RETURNED_IN_TRANSIT",
+          entity: "Transfer",
+          entityId: transfer._id,
+          userId: user.id,
+          metadata: buildTransferAuditMetadata({
+            transferId: transfer._id,
+            quantity: transfer.quantity,
+            status: TransferStatus.CANCELLED,
+            product: snapshot?.product ?? null,
+            brand: snapshot?.brand ?? null,
+            sourceWarehouse: snapshot?.sourceWarehouse ?? null,
+            destinationWarehouse: snapshot?.destinationWarehouse ?? null,
+            initiatedBy: snapshot?.initiatedBy ?? null,
+            returnedBy: { _id: new Types.ObjectId(user.id), name: user.name },
+            extra: {
+              restoredBalance: newQty,
               notes: input.notes,
             },
           }),

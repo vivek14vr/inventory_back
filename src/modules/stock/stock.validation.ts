@@ -97,3 +97,71 @@ export const stockOutBatchSchema = z
 export type StockInInput = z.infer<typeof stockInSchema>;
 export type StockOutInput = z.infer<typeof stockOutSchema>;
 export type StockOutBatchInput = z.infer<typeof stockOutBatchSchema>;
+
+export const clientReturnInvoiceQuerySchema = z.object({
+  invoiceNumber: z.string().min(1, "Invoice number is required").max(100),
+  clientName: z.string().max(200).optional(),
+  warehouseId: z.string().optional(),
+});
+
+export const clientReturnListQuerySchema = paginationQuerySchema.extend({
+  warehouseId: z.string().optional(),
+});
+
+export const clientReturnSubmitSchema = z
+  .object({
+    mode: z.enum(["full", "line", "update_quantity"]),
+    invoiceNumber: z.string().max(100).optional(),
+    clientName: z.string().max(200).optional(),
+    warehouseId: z.string().optional(),
+    saleMovementId: z.string().optional(),
+    quantity: z.coerce.number().int().min(0).optional(),
+    notes: z.string().max(500).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.mode === "full") {
+      if (!data.invoiceNumber?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "invoiceNumber is required for a full invoice return",
+          path: ["invoiceNumber"],
+        });
+      }
+    }
+    if (data.mode === "line") {
+      if (!data.saleMovementId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "saleMovementId is required",
+          path: ["saleMovementId"],
+        });
+      }
+      if (data.quantity === undefined || data.quantity < 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "quantity must be at least 1",
+          path: ["quantity"],
+        });
+      }
+    }
+    if (data.mode === "update_quantity") {
+      if (!data.saleMovementId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "saleMovementId is required",
+          path: ["saleMovementId"],
+        });
+      }
+      if (data.quantity === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "quantity is required",
+          path: ["quantity"],
+        });
+      }
+    }
+  });
+
+export type ClientReturnInvoiceQuery = z.infer<typeof clientReturnInvoiceQuerySchema>;
+export type ClientReturnListQuery = z.infer<typeof clientReturnListQuerySchema>;
+export type ClientReturnSubmitInput = z.infer<typeof clientReturnSubmitSchema>;

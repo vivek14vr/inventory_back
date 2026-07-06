@@ -9,8 +9,12 @@ import {
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as stockService from "./stock.service.js";
+import * as clientReturnService from "./clientReturn.service.js";
 import {
   balancesQuerySchema,
+  clientReturnInvoiceQuerySchema,
+  clientReturnListQuerySchema,
+  clientReturnSubmitSchema,
   productAvailabilityQuerySchema,
   stockInSchema,
   stockOutBatchSchema,
@@ -113,6 +117,60 @@ router.post(
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
     }
     const result = await stockService.stockOutBatch(parsed.data, req.user!);
+    sendSuccess(res, result, 201);
+  })
+);
+
+router.get(
+  "/client-returns/invoices",
+  requireAnyPermission([Permission.STOCK_IN, Permission.STOCK_OUT], {
+    warehouseIdFrom: "query",
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const parsed = clientReturnListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
+    }
+    const { items, pagination } = await clientReturnService.listClientReturnInvoices(
+      parsed.data,
+      req.user!
+    );
+    sendSuccess(res, items, 200, { pagination });
+  })
+);
+
+router.get(
+  "/client-returns/invoice",
+  requireAnyPermission([Permission.STOCK_IN, Permission.STOCK_OUT], {
+    warehouseIdFrom: "query",
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const parsed = clientReturnInvoiceQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
+    }
+    const invoice = await clientReturnService.getClientReturnInvoice(
+      parsed.data,
+      req.user!
+    );
+    sendSuccess(res, invoice);
+  })
+);
+
+router.post(
+  "/client-returns",
+  requireAnyPermission([Permission.STOCK_IN, Permission.STOCK_OUT], {
+    warehouseIdFrom: "body",
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const parsed = clientReturnSubmitSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
+    }
+    const result = await clientReturnService.submitClientReturn(parsed.data, req.user!);
     sendSuccess(res, result, 201);
   })
 );

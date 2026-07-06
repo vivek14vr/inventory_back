@@ -2,6 +2,7 @@ import { Types } from "mongoose";
 import * as XLSX from "xlsx";
 import { AuditLog } from "../../models/AuditLog.js";
 import { Brand } from "../../models/Brand.js";
+import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
@@ -15,7 +16,6 @@ import {
   updateProductWarehouseThresholds,
 } from "../inventory/inventory.service.js";
 import {
-  defaultLowStockThresholdBase,
   resolveLowStockThresholdWithDefault,
 } from "../../shared/constants/lowStockDefaults.js";
 import type { ProductImportConfirmInput } from "./imports.validation.js";
@@ -470,12 +470,21 @@ function buildWarehouseThresholdsWithDefaults(
   });
 }
 
+async function resetImportedProductStockToZero(productId: string) {
+  await InventoryBalance.updateMany({ productId }, { $set: { quantity: 0 } });
+}
+
 async function finalizeImportedProduct(
   productId: string,
   parsed: ParsedProductImportRow,
-  user: AuthUser
+  user: AuthUser,
+  options?: { resetStock?: boolean }
 ) {
   await ensureProductBalancesForAllWarehouses(productId);
+
+  if (options?.resetStock) {
+    await resetImportedProductStockToZero(productId);
+  }
 
   const warehouses = await Warehouse.find({ isActive: true }).select("name code").lean();
   const warehouseThresholds = buildWarehouseThresholdsWithDefaults(parsed, warehouses);
@@ -828,7 +837,9 @@ export async function confirmProductImport(
           secondaryName: nextSecondary,
           ...(wasInactive ? { isActive: true } : {}),
         });
-        await finalizeImportedProduct(String(targetProduct._id), parsed, user);
+        await finalizeImportedProduct(String(targetProduct._id), parsed, user, {
+          resetStock: wasInactive,
+        });
 
         if (wasInactive) {
           const idx = allProducts.findIndex(
@@ -852,7 +863,7 @@ export async function confirmProductImport(
       }
 
       const created = await createProduct(productPayloadFromRow(parsed, brandId));
-      await finalizeImportedProduct(created.id, parsed, user);
+      await finalizeImportedProduct(created.id, parsed, user, { resetStock: true });
       const fresh = await Product.findById(created.id).lean();
       if (fresh) products.push(fresh);
 

@@ -111,4 +111,26 @@ router.post(
   })
 );
 
+router.post(
+  "/:id/return-in-transit",
+  authenticate,
+  requireAnyPermission([
+    Permission.TRANSFERS_MANAGE,
+    Permission.TRANSFERS_RECEIVE,
+    Permission.STOCK_IN,
+  ], { allowScopedWithoutWarehouseId: true }),
+  asyncHandler(async (req, res) => {
+    const parsed = returnTransferSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid body");
+    }
+    const transfer = await transfersService.returnInTransitTransfer(
+      String(req.params.id),
+      parsed.data,
+      req.user!
+    );
+    sendSuccess(res, transfer);
+  })
+);
+
 export const transfersRoutes = router;
