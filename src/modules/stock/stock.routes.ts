@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Permission } from "../../shared/constants/permissions.js";
+import { Permission, STOCK_BALANCE_READ_PERMISSIONS, CLIENT_RETURN_PERMISSIONS } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
 import {
@@ -27,9 +27,7 @@ router.use(authenticate);
 
 router.get(
   "/balances",
-  requireAnyPermission(
-    [Permission.STOCK_VIEW, Permission.STOCK_OUT, Permission.STOCK_IN],
-    {
+  requireAnyPermission(STOCK_BALANCE_READ_PERMISSIONS, {
       warehouseIdFrom: "query",
       allowScopedWithoutWarehouseId: true,
     }
@@ -49,9 +47,7 @@ router.get(
 
 router.get(
   "/availability",
-  requireAnyPermission(
-    [Permission.STOCK_VIEW, Permission.STOCK_OUT, Permission.STOCK_IN],
-    {
+  requireAnyPermission(STOCK_BALANCE_READ_PERMISSIONS, {
       warehouseIdFrom: "query",
       allowScopedWithoutWarehouseId: true,
     }
@@ -123,7 +119,7 @@ router.post(
 
 router.get(
   "/client-returns/invoices",
-  requireAnyPermission([Permission.STOCK_IN, Permission.STOCK_OUT], {
+  requireAnyPermission(CLIENT_RETURN_PERMISSIONS, {
     warehouseIdFrom: "query",
     allowScopedWithoutWarehouseId: true,
   }),
@@ -142,7 +138,7 @@ router.get(
 
 router.get(
   "/client-returns/invoice",
-  requireAnyPermission([Permission.STOCK_IN, Permission.STOCK_OUT], {
+  requireAnyPermission(CLIENT_RETURN_PERMISSIONS, {
     warehouseIdFrom: "query",
     allowScopedWithoutWarehouseId: true,
   }),
@@ -161,7 +157,7 @@ router.get(
 
 router.post(
   "/client-returns",
-  requireAnyPermission([Permission.STOCK_IN, Permission.STOCK_OUT], {
+  requireAnyPermission(CLIENT_RETURN_PERMISSIONS, {
     warehouseIdFrom: "body",
     allowScopedWithoutWarehouseId: true,
   }),

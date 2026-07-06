@@ -7,13 +7,15 @@ import {
   DispatchType,
   StockMovementType,
 } from "../../shared/constants/roles.js";
-import { Permission } from "../../shared/constants/permissions.js";
+import {
+  CLIENT_RETURN_PERMISSIONS,
+} from "../../shared/constants/permissions.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
 import { buildStockMovementAuditMetadata } from "../../shared/utils/auditMetadata.js";
 import { hasPermission, isAdmin, getWarehouseIdsForPermission } from "../../shared/utils/permissions.js";
-import { resolveWarehouseId } from "../../shared/utils/warehouseAccess.js";
+import { resolveWarehouseIdForAnyPermission } from "../../shared/utils/permissions.js";
 import { paginateArray } from "../../shared/pagination/pagination.js";
 import * as balanceService from "./inventory.service.js";
 import * as inventoryAdminService from "../inventory/inventory.service.js";
@@ -94,7 +96,11 @@ function resolveClientReturnWarehouseFilter(
   warehouseId?: string
 ): Record<string, unknown> {
   if (warehouseId) {
-    const resolved = resolveWarehouseId(user, warehouseId, Permission.STOCK_IN);
+    const resolved = resolveWarehouseIdForAnyPermission(
+      user,
+      CLIENT_RETURN_PERMISSIONS,
+      warehouseId
+    );
     return { warehouseId: new Types.ObjectId(resolved) };
   }
 
@@ -103,10 +109,11 @@ function resolveClientReturnWarehouseFilter(
   }
 
   const allowed = [
-    ...new Set([
-      ...getWarehouseIdsForPermission(user, Permission.STOCK_IN),
-      ...getWarehouseIdsForPermission(user, Permission.STOCK_OUT),
-    ]),
+    ...new Set(
+      CLIENT_RETURN_PERMISSIONS.flatMap((code) =>
+        getWarehouseIdsForPermission(user, code)
+      )
+    ),
   ];
 
   if (allowed.length === 0) {
@@ -146,8 +153,9 @@ function saleWarehouseId(
 function assertCanReturnAtWarehouse(user: AuthUser, warehouseId: string): void {
   if (isAdmin(user)) return;
   if (
-    hasPermission(user, Permission.STOCK_IN, warehouseId) ||
-    hasPermission(user, Permission.STOCK_OUT, warehouseId)
+    CLIENT_RETURN_PERMISSIONS.some((code) =>
+      hasPermission(user, code, warehouseId)
+    )
   ) {
     return;
   }
@@ -277,7 +285,11 @@ export async function getClientReturnInvoice(
 
   const clientName = query.clientName ? normalizeClient(query.clientName) : undefined;
   const warehouseId = query.warehouseId
-    ? resolveWarehouseId(user, query.warehouseId, Permission.STOCK_IN)
+    ? resolveWarehouseIdForAnyPermission(
+        user,
+        CLIENT_RETURN_PERMISSIONS,
+        query.warehouseId
+      )
     : undefined;
 
   const sales = await findSaleMovements(invoiceNumber, clientName, warehouseId);

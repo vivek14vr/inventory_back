@@ -6,6 +6,9 @@ export const Permission = {
   STOCK_IN: "stock.in",
   STOCK_OUT: "stock.out",
 
+  RETURNS_CLIENT: "returns.client",
+  RETURNS_WAREHOUSE: "returns.warehouse",
+
   INVENTORY_VIEW: "inventory.view",
   INVENTORY_ADJUST: "inventory.adjust",
   INVENTORY_DASHBOARD: "inventory.dashboard",
@@ -103,6 +106,31 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     ],
   },
   {
+    id: "returns",
+    label: "Returns",
+    description:
+      "Process goods returned from clients (invoice corrections) or sent back between warehouses.",
+    warehouseScoped: true,
+    permissions: [
+      {
+        code: Permission.RETURNS_CLIENT,
+        label: "Client returns by invoice",
+        description:
+          "Open sale invoices and update sold quantities (including zero) to return stock.",
+        example:
+          "Reduce invoice #1042 from 200 to 0 pieces so stock is added back to Goregaon.",
+      },
+      {
+        code: Permission.RETURNS_WAREHOUSE,
+        label: "Warehouse transfer returns",
+        description:
+          "Return received or in-transit transfers back to the source warehouse.",
+        example:
+          "Send a pending Vasai → Goregaon shipment back before it is received.",
+      },
+    ],
+  },
+  {
     id: "inventory",
     label: "Inventory & invoices",
     description:
@@ -118,14 +146,15 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
       {
         code: Permission.INVENTORY_VIEW,
         label: "Browse inventory & movements",
-        description: "Open Check Stock and movement history across all warehouses.",
+        description:
+          "Open Check Stock and movement history across all warehouses (company-wide).",
         example: "Look up Product B stock in every warehouse and recent movements.",
       },
       {
         code: Permission.INVENTORY_ADJUST,
         label: "Adjust quantities & fix invoices",
         description:
-          "Change on-hand quantities, correct wrong invoice numbers, and delete sale invoices.",
+          "Change on-hand quantities, correct wrong invoice numbers, and update sold quantities on invoices.",
         example: "Fix a typo on invoice #1042 or delete a duplicate sale that restored stock.",
       },
     ],
@@ -153,8 +182,8 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
         code: Permission.TRANSFERS_MANAGE,
         label: "Manage all transfers (global)",
         description:
-          "Full transfer control: history, status changes, returns — not limited to one warehouse.",
-        example: "Cancel a stuck transfer or return received goods to the source warehouse.",
+          "Full transfer control: history, status changes — not limited to one warehouse.",
+        example: "Cancel a stuck transfer or review transfer history company-wide.",
         warehouseScoped: false,
       },
     ],
@@ -236,14 +265,17 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
   {
     id: "imports",
     label: "Imports",
-    description: "Bulk import catalog and inventory data.",
+    description:
+      "Bulk import product catalog, Tally sales register (direct sell), and legacy tally stock deductions.",
     warehouseScoped: false,
     permissions: [
       {
         code: Permission.IMPORTS_MANAGE,
         label: "Manage imports",
-        description: "Upload and process import files.",
-        example: "Import a product catalog spreadsheet.",
+        description:
+          "Upload product catalog Excel, sales register Excel, and legacy tally deduction files.",
+        example:
+          "Import a product catalog spreadsheet or backfill Tally sales as stock-out.",
       },
     ],
   },
@@ -315,6 +347,29 @@ export const ALL_PERMISSION_CODES: PermissionCode[] = PERMISSION_MODULES.flatMap
   m.permissions.map((p) => p.code)
 );
 
+/** Permissions that grant client return (invoice sold-qty correction). */
+export const CLIENT_RETURN_PERMISSIONS: PermissionCode[] = [
+  Permission.RETURNS_CLIENT,
+  Permission.STOCK_IN,
+  Permission.STOCK_OUT,
+];
+
+/** Permissions that grant warehouse transfer returns. */
+export const WAREHOUSE_RETURN_PERMISSIONS: PermissionCode[] = [
+  Permission.RETURNS_WAREHOUSE,
+  Permission.TRANSFERS_MANAGE,
+  Permission.TRANSFERS_RECEIVE,
+  Permission.STOCK_IN,
+  Permission.STOCK_OUT,
+];
+
+/** Permissions that grant reading warehouse stock balances. */
+export const STOCK_BALANCE_READ_PERMISSIONS: PermissionCode[] = [
+  Permission.STOCK_VIEW,
+  Permission.STOCK_IN,
+  Permission.STOCK_OUT,
+];
+
 /** Default bundle for legacy warehouse operators */
 export function defaultWarehouseOperatorPermissions(
   warehouseId: string
@@ -324,6 +379,8 @@ export function defaultWarehouseOperatorPermissions(
     { code: Permission.STOCK_VIEW, warehouseId },
     { code: Permission.STOCK_IN, warehouseId },
     { code: Permission.STOCK_OUT, warehouseId },
+    { code: Permission.RETURNS_CLIENT, warehouseId },
+    { code: Permission.RETURNS_WAREHOUSE, warehouseId },
     { code: Permission.TRANSFERS_VIEW, warehouseId },
     { code: Permission.TRANSFERS_RECEIVE, warehouseId },
     { code: Permission.CHECKLISTS_COMPLETE },

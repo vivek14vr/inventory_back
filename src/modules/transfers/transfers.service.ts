@@ -3,7 +3,7 @@ import type mongoose from "mongoose";
 import { AuditLog } from "../../models/AuditLog.js";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Transfer } from "../../models/Transfer.js";
-import { Permission } from "../../shared/constants/permissions.js";
+import { Permission, WAREHOUSE_RETURN_PERMISSIONS } from "../../shared/constants/permissions.js";
 import {
   StockMovementType,
   TransferStatus,
@@ -577,17 +577,19 @@ export async function updateTransferStatus(
   });
 }
 
+function canWarehouseReturnAt(user: AuthUser, warehouseId: string): boolean {
+  if (isAdmin(user)) return true;
+  if (hasPermission(user, Permission.TRANSFERS_MANAGE)) return true;
+  return WAREHOUSE_RETURN_PERMISSIONS.filter(
+    (code) => code !== Permission.TRANSFERS_MANAGE
+  ).some((code) => hasPermission(user, code, warehouseId));
+}
+
 function assertCanReturnTransfer(user: AuthUser, transfer: {
   destinationWarehouseId: Types.ObjectId;
 }) {
-  if (isAdmin(user)) return;
   const destId = String(transfer.destinationWarehouseId);
-  const allowed =
-    hasPermission(user, Permission.TRANSFERS_MANAGE, destId) ||
-    hasPermission(user, Permission.TRANSFERS_RECEIVE, destId) ||
-    hasPermission(user, Permission.STOCK_OUT, destId) ||
-    hasPermission(user, Permission.STOCK_IN, destId);
-  if (!allowed) {
+  if (!canWarehouseReturnAt(user, destId)) {
     throw new ForbiddenError("You do not have permission to return this transfer");
   }
 }
@@ -729,15 +731,9 @@ function assertCanReturnInTransit(user: AuthUser, transfer: {
   sourceWarehouseId: Types.ObjectId;
   destinationWarehouseId: Types.ObjectId;
 }) {
-  if (isAdmin(user)) return;
   const sourceId = String(transfer.sourceWarehouseId);
   const destId = String(transfer.destinationWarehouseId);
-  const allowed =
-    hasPermission(user, Permission.TRANSFERS_MANAGE, sourceId) ||
-    hasPermission(user, Permission.TRANSFERS_MANAGE, destId) ||
-    hasPermission(user, Permission.TRANSFERS_RECEIVE, destId) ||
-    hasPermission(user, Permission.STOCK_IN, destId);
-  if (!allowed) {
+  if (!canWarehouseReturnAt(user, sourceId) && !canWarehouseReturnAt(user, destId)) {
     throw new ForbiddenError("You do not have permission to return this in-transit transfer");
   }
 }
