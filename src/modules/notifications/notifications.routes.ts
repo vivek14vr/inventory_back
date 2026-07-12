@@ -31,6 +31,14 @@ router.get(
 );
 
 router.get(
+  "/poll",
+  asyncHandler(async (req, res) => {
+    const result = await notificationsService.pollNotifications(req.user!);
+    sendSuccess(res, result);
+  })
+);
+
+router.get(
   "/unread-count",
   asyncHandler(async (req, res) => {
     const result = await notificationsService.getUnreadCount(req.user!);

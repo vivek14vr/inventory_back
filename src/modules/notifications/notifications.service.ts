@@ -75,3 +75,17 @@ export async function markAllNotificationsRead(user: AuthUser) {
   );
   return { updated: result.modifiedCount };
 }
+
+export async function pollNotifications(user: AuthUser) {
+  const [syncResult, listResult, countResult] = await Promise.all([
+    syncChecklistReminders(user),
+    listNotifications(user, { resolved: false, limit: 50 }),
+    getUnreadCount(user),
+  ]);
+
+  return {
+    sync: syncResult,
+    items: listResult.items,
+    unreadCount: countResult.count,
+  };
+}

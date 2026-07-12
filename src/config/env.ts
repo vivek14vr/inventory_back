@@ -13,6 +13,14 @@ const envSchema = z.object({
   AUTH_COOKIE_SECURE: z.coerce.boolean().default(false),
   AUTH_COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
+  /** Rate limit window in ms (default 15 minutes). */
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(60_000).default(900_000),
+  /** Max requests per window for authenticated users (JWT). */
+  RATE_LIMIT_MAX_AUTHENTICATED: z.coerce.number().int().min(100).default(20_000),
+  /** Max requests per window per IP for login / unauthenticated traffic. */
+  RATE_LIMIT_MAX_ANONYMOUS: z.coerce.number().int().min(50).default(1_000),
+  /** Set to "true" to disable API rate limiting (not recommended in production). */
+  RATE_LIMIT_DISABLED: z.coerce.boolean().default(false),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -3,7 +3,6 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
-import rateLimit from "express-rate-limit";
 import { env } from "./config/env.js";
 import { createApiRouter } from "./routes/index.js";
 import { notFoundHandler } from "./shared/middleware/notFound.js";
@@ -11,6 +10,8 @@ import { errorHandler } from "./shared/middleware/errorHandler.js";
 
 export function createApp() {
   const app = express();
+
+  app.set("trust proxy", 1);
 
   app.use(helmet());
   app.use(
@@ -38,15 +39,6 @@ export function createApp() {
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: true }));
   app.use(cookieParser());
-
-  app.use(
-    rateLimit({
-      windowMs: 15 * 60 * 1000,
-      max: 500,
-      standardHeaders: true,
-      legacyHeaders: false,
-    })
-  );
 
   app.get("/", (_req, res) => {
     res.json({
