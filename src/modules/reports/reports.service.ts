@@ -321,31 +321,62 @@ export async function reportSalesByClient(query: ReportFilter) {
 
 export async function reportSalesByInvoice(query: ReportFilter) {
   const movements = await salesMovements(query);
+  const grouped = new Map<
+    string,
+    {
+      date: Date;
+      invoiceNumber: string;
+      clientName: string;
+      warehouse: string;
+      totalQuantity: number;
+      lineCount: number;
+      lines: ReturnType<typeof salesMovementLine>[];
+    }
+  >();
+
+  for (const m of movements) {
+    const line = salesMovementLine(m);
+    const invoiceNumber = m.invoiceNumber ?? "";
+    const clientName = m.clientName ?? "";
+    const invoiceKey = `${invoiceNumber}\0${clientName}\0${line.warehouse}`;
+
+    let inv = grouped.get(invoiceKey);
+    if (!inv) {
+      inv = {
+        date: m.createdAt,
+        invoiceNumber,
+        clientName,
+        warehouse: line.warehouse,
+        totalQuantity: 0,
+        lineCount: 0,
+        lines: [],
+      };
+      grouped.set(invoiceKey, inv);
+    }
+    inv.totalQuantity += m.quantity;
+    inv.lineCount += 1;
+    inv.lines.push(line);
+    if (m.createdAt < inv.date) {
+      inv.date = m.createdAt;
+    }
+  }
 
   return {
-    rows: movements.map((m) => {
-      const product = m.productId as unknown as {
-        name: string;
-        stockUnit?: string;
-        unitsPerStockUnit?: number;
-        baseUnit?: string;
-      };
-      const brand = m.brandId as unknown as { name: string };
-      const warehouse = m.warehouseId as unknown as { code: string };
-
-      return {
-        date: m.createdAt,
-        invoiceNumber: m.invoiceNumber ?? "",
-        clientName: m.clientName ?? "",
-        warehouse: warehouse.code,
-        product: product.name,
-        brand: brand.name,
-        quantity: m.quantity,
-        stockUnit: product.stockUnit ?? "unit",
-        unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
-        baseUnit: product.baseUnit ?? "piece",
-      };
-    }),
+    rows: Array.from(grouped.values())
+      .sort((a, b) => {
+        const byDate = new Date(b.date).getTime() - new Date(a.date).getTime();
+        if (byDate !== 0) return byDate;
+        return a.invoiceNumber.localeCompare(b.invoiceNumber);
+      })
+      .map((inv) => ({
+        date: inv.date,
+        invoiceNumber: inv.invoiceNumber,
+        clientName: inv.clientName,
+        warehouse: inv.warehouse,
+        totalQuantity: inv.totalQuantity,
+        lineCount: inv.lineCount,
+        lines: inv.lines,
+      })),
   };
 }
 
@@ -353,19 +384,65 @@ export async function reportSalesByBrand(query: ReportFilter) {
   const movements = await salesMovements(query);
   const grouped = new Map<
     string,
-    { brand: string; totalQuantity: number; saleCount: number }
+    {
+      brand: string;
+      totalQuantity: number;
+      saleCount: number;
+      products: Map<
+        string,
+        {
+          product: string;
+          quantity: number;
+          saleCount: number;
+          stockUnit: string;
+          unitsPerStockUnit: number;
+          baseUnit: string;
+        }
+      >;
+    }
   >();
 
   for (const m of movements) {
-    const brand = (m.brandId as unknown as { name: string }).name;
-    const g = grouped.get(brand) ?? { brand, totalQuantity: 0, saleCount: 0 };
+    const line = salesMovementLine(m);
+    const brand = line.brand;
+
+    const g = grouped.get(brand) ?? {
+      brand,
+      totalQuantity: 0,
+      saleCount: 0,
+      products: new Map(),
+    };
     g.totalQuantity += m.quantity;
     g.saleCount += 1;
+
+    let product = g.products.get(line.product);
+    if (!product) {
+      product = {
+        product: line.product,
+        quantity: 0,
+        saleCount: 0,
+        stockUnit: line.stockUnit,
+        unitsPerStockUnit: line.unitsPerStockUnit,
+        baseUnit: line.baseUnit,
+      };
+      g.products.set(line.product, product);
+    }
+    product.quantity += m.quantity;
+    product.saleCount += 1;
     grouped.set(brand, g);
   }
 
   return {
-    rows: Array.from(grouped.values()).sort((a, b) => a.brand.localeCompare(b.brand)),
+    rows: Array.from(grouped.values())
+      .map((g) => ({
+        brand: g.brand,
+        totalQuantity: g.totalQuantity,
+        saleCount: g.saleCount,
+        products: Array.from(g.products.values()).sort((a, b) =>
+          a.product.localeCompare(b.product)
+        ),
+      }))
+      .sort((a, b) => a.brand.localeCompare(b.brand)),
   };
 }
 
@@ -440,12 +517,13 @@ export function exportReportCsv(
       filename: "transfer-report",
       columns: [
         { key: "date", header: "Date" },
-        { key: "status", header: "Status" },
-        { key: "product", header: "Product" },
-        { key: "brand", header: "Brand" },
-        { key: "quantity", header: "Quantity" },
         { key: "from", header: "From" },
         { key: "to", header: "To" },
+        { key: "product", header: "Product" },
+        { key: "brand", header: "Brand" },
+        { key: "status", header: "Status" },
+        { key: "quantity", header: "Quantity" },
+        { key: "receivedAt", header: "Received At" },
       ],
     },
     "sales-client": {
@@ -463,9 +541,8 @@ export function exportReportCsv(
         { key: "invoiceNumber", header: "Invoice" },
         { key: "clientName", header: "Client" },
         { key: "warehouse", header: "Warehouse" },
-        { key: "product", header: "Product" },
-        { key: "brand", header: "Brand" },
-        { key: "quantity", header: "Quantity" },
+        { key: "totalQuantity", header: "Total Quantity" },
+        { key: "lineCount", header: "Products" },
       ],
     },
     "sales-brand": {
