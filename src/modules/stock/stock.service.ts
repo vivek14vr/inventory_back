@@ -1,9 +1,11 @@
+import crypto from "node:crypto";
 import { Types } from "mongoose";
 import type mongoose from "mongoose";
 import { AuditLog } from "../../models/AuditLog.js";
 import { Brand } from "../../models/Brand.js";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
+import { SalesInvoiceClaim } from "../../models/SalesInvoiceClaim.js";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Transfer } from "../../models/Transfer.js";
 import { Warehouse } from "../../models/Warehouse.js";
@@ -15,7 +17,11 @@ import {
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../shared/errors/AppError.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import type { AuthUser } from "../../shared/types/auth.js";
-import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
+import {
+  dbSession,
+  mongoSupportsTransactions,
+  runInTransaction,
+} from "../../shared/utils/mongoTransaction.js";
 import {
   buildStockMovementAuditMetadata,
   buildTransferAuditMetadata,
@@ -669,6 +675,117 @@ type ValidatedSaleLine = {
   quantity: number;
 };
 
+const INVOICE_CLAIM_TTL_MS = 15 * 60 * 1000;
+
+function normalizeInvoiceClaimPart(value: string): string {
+  return value.trim().normalize("NFKC").toLocaleLowerCase("en");
+}
+
+async function findExistingInvoiceMovements(
+  warehouseId: string,
+  invoiceNumber: string,
+  clientName: string
+) {
+  return StockMovement.find({
+    type: StockMovementType.STOCK_OUT,
+    dispatchType: DispatchType.DIRECT_SELLING,
+    warehouseId: new Types.ObjectId(warehouseId),
+    invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
+    clientName: exactCaseInsensitiveRegex(clientName),
+  })
+    .select("_id")
+    .lean();
+}
+
+async function acquireSalesInvoiceClaim(
+  warehouseId: string,
+  invoiceNumber: string,
+  clientName: string
+) {
+  await SalesInvoiceClaim.init();
+
+  const key = {
+    warehouseId: new Types.ObjectId(warehouseId),
+    invoiceNormalized: normalizeInvoiceClaimPart(invoiceNumber),
+    clientNormalized: normalizeInvoiceClaimPart(clientName),
+  };
+  const claimToken = crypto.randomUUID();
+  const processingExpiresAt = new Date(Date.now() + INVOICE_CLAIM_TTL_MS);
+
+  const legacyMovements = await findExistingInvoiceMovements(
+    warehouseId,
+    invoiceNumber,
+    clientName
+  );
+  if (legacyMovements.length > 0) {
+    throw new BadRequestError(
+      `Invoice ${invoiceNumber} for ${clientName} was already imported at this warehouse`
+    );
+  }
+
+  try {
+    return await SalesInvoiceClaim.create({
+      ...key,
+      invoiceNumber,
+      clientName,
+      status: "PROCESSING",
+      claimToken,
+      processingExpiresAt,
+    });
+  } catch (err: unknown) {
+    if ((err as { code?: number }).code !== 11000) throw err;
+  }
+
+  const reclaimed = await SalesInvoiceClaim.findOneAndUpdate(
+    {
+      ...key,
+      status: "PROCESSING",
+      processingExpiresAt: { $lte: new Date() },
+    },
+    {
+      $set: {
+        invoiceNumber,
+        clientName,
+        claimToken,
+        processingExpiresAt,
+      },
+      $unset: { failureMessage: 1 },
+    },
+    { new: true }
+  );
+
+  if (reclaimed) {
+    const existingMovements = await findExistingInvoiceMovements(
+      warehouseId,
+      invoiceNumber,
+      clientName
+    );
+    if (existingMovements.length === 0) return reclaimed;
+
+    await SalesInvoiceClaim.updateOne(
+      { _id: reclaimed._id, claimToken },
+      {
+        $set: {
+          status: "COMPLETED",
+          movementIds: existingMovements.map((movement) => movement._id),
+        },
+        $unset: { processingExpiresAt: 1 },
+      }
+    );
+  }
+
+  const existing = await SalesInvoiceClaim.findOne(key).select("status").lean();
+  const suffix =
+    existing?.status === "PROCESSING"
+      ? " is currently being processed"
+      : existing?.status === "FAILED"
+        ? " requires review after a partial failure"
+        : " was already imported";
+  throw new BadRequestError(
+    `Invoice ${invoiceNumber} for ${clientName}${suffix} at this warehouse`
+  );
+}
+
 export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
   const warehouseId = resolveWarehouseId(
     user,
@@ -699,93 +816,137 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
   const invoiceNumber = input.invoiceNumber?.trim() || undefined;
   const notes = input.notes?.trim() || undefined;
 
-  const txnResult = await runInTransaction(async (session) => {
-    if (invoiceNumber && clientName) {
-      const duplicateInvoice = await StockMovement.exists({
-        type: StockMovementType.STOCK_OUT,
-        dispatchType: DispatchType.DIRECT_SELLING,
-        warehouseId: new Types.ObjectId(warehouseId),
-        invoiceNumber: exactCaseInsensitiveRegex(invoiceNumber),
-        clientName: exactCaseInsensitiveRegex(clientName),
-      }).session(session ?? null);
-      if (duplicateInvoice) {
-        throw new BadRequestError(
-          `Invoice ${invoiceNumber} for ${clientName} was already imported at this warehouse`
+  const claim = invoiceNumber
+    ? await acquireSalesInvoiceClaim(warehouseId, invoiceNumber, clientName)
+    : null;
+  const transactionsSupported = claim
+    ? await mongoSupportsTransactions()
+    : false;
+  let writesStarted = false;
+
+  let txnResult: {
+    movementIds: Types.ObjectId[];
+    balances: Record<string, number>;
+  };
+  try {
+    txnResult = await runInTransaction(async (session) => {
+      for (const line of validatedLines) {
+        await inventoryService.assertSufficientStock(
+          warehouseId,
+          String(line.productId),
+          line.quantity,
+          session
         );
       }
-    }
 
-    for (const line of validatedLines) {
-      await inventoryService.assertSufficientStock(
-        warehouseId,
-        String(line.productId),
-        line.quantity,
-        session
-      );
-    }
+      const movementIds: Types.ObjectId[] = [];
+      const balances: Record<string, number> = {};
 
-    const movementIds: Types.ObjectId[] = [];
-    const balances: Record<string, number> = {};
+      for (const line of validatedLines) {
+        writesStarted = true;
+        const newQty = await inventoryService.adjustBalance(
+          warehouseId,
+          String(line.productId),
+          -line.quantity,
+          session
+        );
+        balances[String(line.productId)] = newQty;
 
-    for (const line of validatedLines) {
-      const newQty = await inventoryService.adjustBalance(
-        warehouseId,
-        String(line.productId),
-        -line.quantity,
-        session
-      );
-      balances[String(line.productId)] = newQty;
-
-      const [movement] = await StockMovement.create(
-        [
-          {
-            type: StockMovementType.STOCK_OUT,
-            warehouseId,
-            productId: line.productId,
-            brandId: line.brandId,
-            quantity: line.quantity,
-            dispatchType: DispatchType.DIRECT_SELLING,
-            clientName,
-            invoiceNumber,
-            notes,
-            createdBy: user.id,
-          },
-        ],
-        dbSession(session)
-      );
-      movementIds.push(movement._id);
-
-      await AuditLog.create(
-        [
-          {
-            action: "STOCK_OUT",
-            entity: "StockMovement",
-            entityId: movement._id,
-            userId: user.id,
-            metadata: buildStockMovementAuditMetadata({
+        const [movement] = await StockMovement.create(
+          [
+            {
+              type: StockMovementType.STOCK_OUT,
+              warehouseId,
+              productId: line.productId,
+              brandId: line.brandId,
               quantity: line.quantity,
-              warehouse: sourceWarehouse as {
-                _id: Types.ObjectId;
-                name: string;
-                code: string;
-              } | null,
-              product: { _id: line.productId, name: line.productName },
-              brand: { _id: line.brandId, name: line.brandName },
               dispatchType: DispatchType.DIRECT_SELLING,
-              destinationWarehouse: null,
-              transferId: undefined,
               clientName,
               invoiceNumber,
               notes,
-            }),
-          },
-        ],
-        dbSession(session)
-      );
-    }
+              createdBy: user.id,
+            },
+          ],
+          dbSession(session)
+        );
+        movementIds.push(movement._id);
 
-    return { movementIds, balances };
-  });
+        await AuditLog.create(
+          [
+            {
+              action: "STOCK_OUT",
+              entity: "StockMovement",
+              entityId: movement._id,
+              userId: user.id,
+              metadata: buildStockMovementAuditMetadata({
+                quantity: line.quantity,
+                warehouse: sourceWarehouse as {
+                  _id: Types.ObjectId;
+                  name: string;
+                  code: string;
+                } | null,
+                product: { _id: line.productId, name: line.productName },
+                brand: { _id: line.brandId, name: line.brandName },
+                dispatchType: DispatchType.DIRECT_SELLING,
+                destinationWarehouse: null,
+                transferId: undefined,
+                clientName,
+                invoiceNumber,
+                notes,
+              }),
+            },
+          ],
+          dbSession(session)
+        );
+      }
+
+      return { movementIds, balances };
+    });
+  } catch (err) {
+    if (claim) {
+      if (transactionsSupported || !writesStarted) {
+        await SalesInvoiceClaim.deleteOne({
+          _id: claim._id,
+          claimToken: claim.claimToken,
+          status: "PROCESSING",
+        });
+      } else {
+        await SalesInvoiceClaim.updateOne(
+          {
+            _id: claim._id,
+            claimToken: claim.claimToken,
+            status: "PROCESSING",
+          },
+          {
+            $set: {
+              status: "FAILED",
+              failureMessage:
+                err instanceof Error ? err.message : "Stock out failed",
+            },
+            $unset: { processingExpiresAt: 1 },
+          }
+        );
+      }
+    }
+    throw err;
+  }
+
+  if (claim) {
+    await SalesInvoiceClaim.updateOne(
+      {
+        _id: claim._id,
+        claimToken: claim.claimToken,
+        status: "PROCESSING",
+      },
+      {
+        $set: {
+          status: "COMPLETED",
+          movementIds: txnResult.movementIds,
+        },
+        $unset: { processingExpiresAt: 1, failureMessage: 1 },
+      }
+    );
+  }
 
   const populated = await StockMovement.find({ _id: { $in: txnResult.movementIds } })
     .populate("productId", "name")

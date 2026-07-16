@@ -51,14 +51,6 @@ router.get(
   })
 );
 
-router.get(
-  "/:id",
-  asyncHandler(async (req, res) => {
-    const doc = await importsService.getImportById(String(req.params.id));
-    sendSuccess(res, doc);
-  })
-);
-
 router.post(
   "/products/preview",
   upload.single("file"),
@@ -146,6 +138,14 @@ router.post(
     );
 
     sendSuccess(res, result, 201);
+  })
+);
+
+router.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const doc = await importsService.getImportById(String(req.params.id));
+    sendSuccess(res, doc);
   })
 );
 

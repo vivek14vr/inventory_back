@@ -20,11 +20,27 @@ async function backfillProductNameNormalized(): Promise<void> {
   console.log(`Backfilled nameNormalized on ${missing.length} product(s)`);
 }
 
+async function removeInvalidInvoiceMovementIndex(): Promise<void> {
+  const { StockMovement } = await import("../models/StockMovement.js");
+  try {
+    await StockMovement.collection.dropIndex(
+      "uniq_direct_sell_invoice_client"
+    );
+    console.log("Removed invalid movement-level invoice uniqueness index");
+  } catch (err: unknown) {
+    const mongoError = err as { code?: number; codeName?: string };
+    if (mongoError.code !== 27 && mongoError.codeName !== "IndexNotFound") {
+      throw err;
+    }
+  }
+}
+
 export async function connectDatabase(): Promise<void> {
   mongoose.set("strictQuery", true);
 
   await mongoose.connect(env.MONGODB_URI);
   console.log("MongoDB connected");
+  await removeInvalidInvoiceMovementIndex();
   await backfillProductNameNormalized();
 }
 

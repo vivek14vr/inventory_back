@@ -5,6 +5,10 @@ export { Product, type IProduct } from "./Product.js";
 export { User, type IUser } from "./User.js";
 export { InventoryBalance, type IInventoryBalance } from "./InventoryBalance.js";
 export { StockMovement, type IStockMovement } from "./StockMovement.js";
+export {
+  SalesInvoiceClaim,
+  type ISalesInvoiceClaim,
+} from "./SalesInvoiceClaim.js";
 export { Transfer, type ITransfer } from "./Transfer.js";
 export { AuditLog, type IAuditLog } from "./AuditLog.js";
 export { TallyImport, type ITallyImport } from "./TallyImport.js";

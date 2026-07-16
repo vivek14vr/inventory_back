@@ -1135,14 +1135,14 @@ export async function ensureProductBalancesForAllWarehouses(
     throw new BadRequestError("Invalid product");
   }
 
-  const product = await Product.findById(productId).lean();
+  const product = await Product.findById(productId).session(session ?? null).lean();
   if (!product) {
     throw new NotFoundError("Product not found");
   }
 
   const [warehouses, existingBalances] = await Promise.all([
-    Warehouse.find({ isActive: true }).select("_id").lean(),
-    InventoryBalance.find({ productId }).select("warehouseId").lean(),
+    Warehouse.find({ isActive: true }).select("_id").session(session ?? null).lean(),
+    InventoryBalance.find({ productId }).select("warehouseId").session(session ?? null).lean(),
   ]);
 
   const existingWarehouseIds = new Set(
@@ -1163,12 +1163,15 @@ export async function ensureProductBalancesForAllWarehouses(
 }
 
 /** Ensures every active warehouse has an explicit low-stock threshold (default 10 cartons). */
-export async function ensureDefaultWarehouseLowStockThresholds(productId: string) {
+export async function ensureDefaultWarehouseLowStockThresholds(
+  productId: string,
+  session?: ClientSession | null
+) {
   if (!Types.ObjectId.isValid(productId)) {
     throw new BadRequestError("Invalid product");
   }
 
-  const product = await Product.findById(productId).lean();
+  const product = await Product.findById(productId).session(session ?? null).lean();
   if (!product) {
     throw new NotFoundError("Product not found");
   }
@@ -1179,24 +1182,27 @@ export async function ensureDefaultWarehouseLowStockThresholds(productId: string
   if (product.totalLowStockThreshold == null) {
     await Product.updateOne(
       { _id: productId },
-      { $set: { totalLowStockThreshold: defaultBase } }
+      { $set: { totalLowStockThreshold: defaultBase } },
+      dbSession(session)
     );
   }
 
-  await ensureProductBalancesForAllWarehouses(productId);
+  await ensureProductBalancesForAllWarehouses(productId, session);
 
   await InventoryBalance.updateMany(
     {
       productId,
       $or: [{ lowStockThreshold: { $exists: false } }, { lowStockThreshold: null }],
     },
-    { $set: { lowStockThreshold: defaultBase } }
+    { $set: { lowStockThreshold: defaultBase } },
+    dbSession(session)
   );
 }
 
 export async function updateLowStockThreshold(
   input: UpdateLowStockThresholdInput,
-  user: AuthUser
+  user: AuthUser,
+  session?: ClientSession | null
 ) {
   if (
     !Types.ObjectId.isValid(input.warehouseId) ||
@@ -1206,12 +1212,14 @@ export async function updateLowStockThreshold(
   }
 
   const [warehouse, product, existingBalance] = await Promise.all([
-    Warehouse.findOne({ _id: input.warehouseId, isActive: true }).lean(),
-    Product.findById(input.productId).lean(),
+    Warehouse.findOne({ _id: input.warehouseId, isActive: true })
+      .session(session ?? null)
+      .lean(),
+    Product.findById(input.productId).session(session ?? null).lean(),
     InventoryBalance.findOne({
       warehouseId: input.warehouseId,
       productId: input.productId,
-    }),
+    }).session(session ?? null),
   ]);
 
   if (!warehouse) {
@@ -1226,19 +1234,25 @@ export async function updateLowStockThreshold(
     if (input.lowStockThreshold === null) {
       throw new NotFoundError("No stock record for this product at this warehouse");
     }
-    balance = await InventoryBalance.create({
-      warehouseId: input.warehouseId,
-      productId: input.productId,
-      quantity: 0,
-      lowStockThreshold: input.lowStockThreshold,
-    });
+    const [created] = await InventoryBalance.create(
+      [
+        {
+          warehouseId: input.warehouseId,
+          productId: input.productId,
+          quantity: 0,
+          lowStockThreshold: input.lowStockThreshold,
+        },
+      ],
+      dbSession(session)
+    );
+    balance = created;
   } else {
     if (input.lowStockThreshold === null) {
       balance.lowStockThreshold = undefined;
     } else {
       balance.lowStockThreshold = input.lowStockThreshold;
     }
-    await balance.save();
+    await balance.save(dbSession(session));
   }
 
   const effectiveThreshold = resolveLowStockThreshold(
@@ -1246,21 +1260,26 @@ export async function updateLowStockThreshold(
     product.lowStockThreshold
   );
 
-  await AuditLog.create({
-    action: "LOW_STOCK_THRESHOLD_UPDATED",
-    entity: "InventoryBalance",
-    entityId: balance._id,
-    userId: user.id,
-    metadata: {
-      warehouseId: input.warehouseId,
-      warehouseName: warehouse.name,
-      warehouseCode: warehouse.code,
-      productId: input.productId,
-      productName: product.name,
-      lowStockThreshold: input.lowStockThreshold,
-      effectiveThreshold,
-    },
-  });
+  await AuditLog.create(
+    [
+      {
+        action: "LOW_STOCK_THRESHOLD_UPDATED",
+        entity: "InventoryBalance",
+        entityId: balance._id,
+        userId: user.id,
+        metadata: {
+          warehouseId: input.warehouseId,
+          warehouseName: warehouse.name,
+          warehouseCode: warehouse.code,
+          productId: input.productId,
+          productName: product.name,
+          lowStockThreshold: input.lowStockThreshold,
+          effectiveThreshold,
+        },
+      },
+    ],
+    dbSession(session)
+  );
 
   return {
     warehouseId: input.warehouseId,
@@ -1375,13 +1394,14 @@ export async function listProductWarehouseThresholds(
 export async function updateProductWarehouseThresholds(
   productId: string,
   thresholds: Array<{ warehouseId: string; lowStockThreshold: number | null }>,
-  user: AuthUser
+  user: AuthUser,
+  session?: ClientSession | null
 ) {
   if (!Types.ObjectId.isValid(productId)) {
     throw new BadRequestError("Invalid product");
   }
 
-  const product = await Product.findById(productId).lean();
+  const product = await Product.findById(productId).session(session ?? null).lean();
   if (!product) {
     throw new NotFoundError("Product not found");
   }
@@ -1394,7 +1414,8 @@ export async function updateProductWarehouseThresholds(
         productId,
         lowStockThreshold: row.lowStockThreshold,
       },
-      user
+      user,
+      session
     );
     results.push(result);
   }

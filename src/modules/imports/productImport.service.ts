@@ -431,7 +431,8 @@ async function applyImportedWarehouseThresholds(
   productId: string,
   thresholds: WarehouseLowStockImportEntry[],
   unitsPerStockUnit: number,
-  user: AuthUser
+  user: AuthUser,
+  session?: ClientSession | null
 ) {
   if (thresholds.length === 0) return;
 
@@ -444,7 +445,8 @@ async function applyImportedWarehouseThresholds(
         unitsPerStockUnit
       ),
     })),
-    user
+    user,
+    session
   );
 }
 
@@ -502,7 +504,8 @@ async function finalizeImportedProduct(
       productId,
       explicitThresholds,
       parsed.unitsPerStockUnit,
-      user
+      user,
+      session
     );
   }
 }
@@ -844,15 +847,19 @@ export async function confirmProductImport(
             normalizeProductName(nextName)
             ? payload.secondaryName
             : targetProduct.secondaryName;
-        await updateProduct(String(targetProduct._id), {
-          name: nextName,
-          baseUnit: payload.baseUnit,
-          stockUnit: payload.stockUnit,
-          unitsPerStockUnit: payload.unitsPerStockUnit,
-          totalLowStockThreshold: payload.totalLowStockThreshold,
-          secondaryName: nextSecondary,
-          ...(wasInactive ? { isActive: true } : {}),
-        });
+        await updateProduct(
+          String(targetProduct._id),
+          {
+            name: nextName,
+            baseUnit: payload.baseUnit,
+            stockUnit: payload.stockUnit,
+            unitsPerStockUnit: payload.unitsPerStockUnit,
+            totalLowStockThreshold: payload.totalLowStockThreshold,
+            secondaryName: nextSecondary,
+            ...(wasInactive ? { isActive: true } : {}),
+          },
+          session
+        );
         await finalizeImportedProduct(String(targetProduct._id), parsed, user, undefined, session);
 
         return {
@@ -866,7 +873,10 @@ export async function confirmProductImport(
         };
       }
 
-      const created = await createProduct(productPayloadFromRow(parsed, brandId));
+      const created = await createProduct(
+        productPayloadFromRow(parsed, brandId),
+        session
+      );
       await finalizeImportedProduct(created.id, parsed, user, { resetStock: true }, session);
       return {
         status: "SUCCESS" as const,

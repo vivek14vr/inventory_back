@@ -1,4 +1,4 @@
-import { Types } from "mongoose";
+import { Types, type ClientSession } from "mongoose";
 import { Brand } from "../../models/Brand.js";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
@@ -15,6 +15,7 @@ import { normalizeProductName } from "../../shared/utils/productName.js";
 import {
   resolveLowStockThresholdWithDefault,
 } from "../../shared/constants/lowStockDefaults.js";
+import { dbSession } from "../../shared/utils/mongoTransaction.js";
 import type {
   CreateProductInput,
   ListProductsQuery,
@@ -202,35 +203,44 @@ export async function getProductById(id: string) {
   return toPublicProduct(product as ProductDoc);
 }
 
-export async function createProduct(input: CreateProductInput) {
+export async function createProduct(
+  input: CreateProductInput,
+  session?: ClientSession | null
+) {
   await validateBrand(input.brandId);
   await assertUniqueProductLabels(input.brandId, input.name, input.secondaryName);
 
   const normalized = normalizeProductName(input.name);
 
   try {
-    const product = await Product.create({
-      name: input.name.trim(),
-      nameNormalized: normalized,
-      secondaryName: input.secondaryName?.trim() || undefined,
-      brandId: input.brandId,
-      baseUnit: input.baseUnit ?? "piece",
-      stockUnit: input.stockUnit ?? "unit",
-      unitsPerStockUnit: input.unitsPerStockUnit ?? 1,
-      totalLowStockThreshold: resolveLowStockThresholdWithDefault(
-        input.totalLowStockThreshold,
-        input.unitsPerStockUnit ?? 1
-      ),
-      isActive: input.isActive ?? true,
-    });
+    const [product] = await Product.create(
+      [
+        {
+          name: input.name.trim(),
+          nameNormalized: normalized,
+          secondaryName: input.secondaryName?.trim() || undefined,
+          brandId: input.brandId,
+          baseUnit: input.baseUnit ?? "piece",
+          stockUnit: input.stockUnit ?? "unit",
+          unitsPerStockUnit: input.unitsPerStockUnit ?? 1,
+          totalLowStockThreshold: resolveLowStockThresholdWithDefault(
+            input.totalLowStockThreshold,
+            input.unitsPerStockUnit ?? 1
+          ),
+          isActive: input.isActive ?? true,
+        },
+      ],
+      dbSession(session)
+    );
 
     const populated = await Product.findById(product._id)
       .populate("brandId", "name isActive")
+      .session(session ?? null)
       .lean();
 
     const publicProduct = toPublicProduct(populated as ProductDoc);
-    await ensureProductBalancesForAllWarehouses(publicProduct.id);
-    await ensureDefaultWarehouseLowStockThresholds(publicProduct.id);
+    await ensureProductBalancesForAllWarehouses(publicProduct.id, session);
+    await ensureDefaultWarehouseLowStockThresholds(publicProduct.id, session);
 
     return publicProduct;
   } catch (err: unknown) {
@@ -243,12 +253,16 @@ export async function createProduct(input: CreateProductInput) {
   }
 }
 
-export async function updateProduct(id: string, input: UpdateProductInput) {
+export async function updateProduct(
+  id: string,
+  input: UpdateProductInput,
+  session?: ClientSession | null
+) {
   if (!Types.ObjectId.isValid(id)) {
     throw new NotFoundError("Product not found");
   }
 
-  const product = await Product.findById(id);
+  const product = await Product.findById(id).session(session ?? null);
   if (!product) {
     throw new NotFoundError("Product not found");
   }
@@ -302,9 +316,10 @@ export async function updateProduct(id: string, input: UpdateProductInput) {
   );
 
   try {
-    await product.save();
+    await product.save(dbSession(session));
     const populated = await Product.findById(product._id)
       .populate("brandId", "name isActive")
+      .session(session ?? null)
       .lean();
     return toPublicProduct(populated as ProductDoc);
   } catch (err: unknown) {

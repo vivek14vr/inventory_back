@@ -82,30 +82,45 @@ export async function rotateRefreshToken(
   meta: SessionMeta = {}
 ): Promise<{ tokens: AuthTokens; user: AuthUser }> {
   const tokenHash = hashToken(refreshToken);
-  const session = await RefreshSession.findOne({ tokenHash });
+  const now = new Date();
+
+  // Atomically claim the session so concurrent refresh cannot double-rotate.
+  const session = await RefreshSession.findOneAndUpdate(
+    {
+      tokenHash,
+      revokedAt: { $exists: false },
+      expiresAt: { $gt: now },
+    },
+    { $set: { revokedAt: now } },
+    { new: false }
+  );
 
   if (!session) {
+    const existing = await RefreshSession.findOne({ tokenHash });
+    if (!existing) {
+      throw new UnauthorizedError("Invalid refresh token");
+    }
+    if (existing.revokedAt) {
+      await RefreshSession.updateMany(
+        { familyId: existing.familyId, revokedAt: { $exists: false } },
+        { revokedAt: new Date() }
+      );
+      throw new UnauthorizedError("Refresh token reuse detected — session revoked");
+    }
+    if (existing.expiresAt.getTime() < Date.now()) {
+      existing.revokedAt = new Date();
+      await existing.save();
+      throw new UnauthorizedError("Refresh token expired");
+    }
     throw new UnauthorizedError("Invalid refresh token");
-  }
-
-  if (session.revokedAt) {
-    await RefreshSession.updateMany(
-      { familyId: session.familyId, revokedAt: { $exists: false } },
-      { revokedAt: new Date() }
-    );
-    throw new UnauthorizedError("Refresh token reuse detected — session revoked");
-  }
-
-  if (session.expiresAt.getTime() < Date.now()) {
-    session.revokedAt = new Date();
-    await session.save();
-    throw new UnauthorizedError("Refresh token expired");
   }
 
   const authUser = await buildAuthUser(String(session.userId));
   if (!authUser) {
-    session.revokedAt = new Date();
-    await session.save();
+    await RefreshSession.updateMany(
+      { familyId: session.familyId, revokedAt: { $exists: false } },
+      { revokedAt: new Date() }
+    );
     throw new UnauthorizedError("User not found or inactive");
   }
 
@@ -119,7 +134,6 @@ export async function rotateRefreshToken(
     ipAddress: meta.ipAddress ?? session.ipAddress,
   });
 
-  session.revokedAt = new Date();
   session.replacedBy = newSession._id;
   await session.save();
 

@@ -715,17 +715,6 @@ export async function submitClientReturn(input: ClientReturnSubmitInput, user: A
       returnedQuantity
     );
 
-    if (inventoryDelta > 0 && balanceAfter !== balanceBefore + inventoryDelta) {
-      throw new BadRequestError(
-        "Inventory was not updated correctly — please refresh and try again"
-      );
-    }
-    if (inventoryDelta < 0 && balanceAfter !== balanceBefore + inventoryDelta) {
-      throw new BadRequestError(
-        "Inventory was not updated correctly — please refresh and try again"
-      );
-    }
-
     return {
       mode: input.mode,
       updatedMovementId: row.id,

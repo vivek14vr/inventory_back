@@ -644,6 +644,15 @@ export async function returnTransfer(
 
     assertCanReturnTransfer(user, transfer);
 
+    const sourceId = String(transfer.sourceWarehouseId);
+    const destId = String(transfer.destinationWarehouseId);
+    const productId = String(transfer.productId);
+    const qty = transfer.quantity;
+
+    // Assert before claiming status so standalone Mongo cannot leave a
+    // RETURNED transfer with no stock movements when stock is insufficient.
+    await balanceService.assertSufficientStock(destId, productId, qty, session);
+
     const claimed = await Transfer.findOneAndUpdate(
       { _id: transferId, status: TransferStatus.RECEIVED },
       {
@@ -659,13 +668,6 @@ export async function returnTransfer(
     if (!claimed) {
       throw new BadRequestError("Transfer is no longer in received status");
     }
-
-    const sourceId = String(claimed.sourceWarehouseId);
-    const destId = String(claimed.destinationWarehouseId);
-    const productId = String(claimed.productId);
-    const qty = claimed.quantity;
-
-    await balanceService.assertSufficientStock(destId, productId, qty, session);
 
     const note =
       input.notes?.trim() ||

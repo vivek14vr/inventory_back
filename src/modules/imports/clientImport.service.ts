@@ -217,6 +217,7 @@ export async function confirmClientImport(input: ClientImportConfirmInput, user:
   const resultRows: ClientImportResultRow[] = [];
   let successCount = 0;
   let failedCount = 0;
+  const seenPrimary = new Map<string, number>();
 
   for (const row of input.rows) {
     const base = {
@@ -231,6 +232,15 @@ export async function confirmClientImport(input: ClientImportConfirmInput, user:
     if (!base.primaryName) errors.push("Primary name is required");
     if (row.action === "merge" && !row.mergeTargetClientId) {
       errors.push("Select a client to merge into");
+    }
+
+    const normalized = base.primaryName.toLowerCase();
+    if (normalized && seenPrimary.has(normalized)) {
+      errors.push(
+        `Duplicate primary name (same as row ${seenPrimary.get(normalized)})`
+      );
+    } else if (normalized) {
+      seenPrimary.set(normalized, row.rowNumber);
     }
 
     if (errors.length > 0) {
