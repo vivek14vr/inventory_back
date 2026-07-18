@@ -4,16 +4,39 @@ import {
   type PermissionCode,
 } from "../constants/permissions.js";
 import { BadRequestError, ForbiddenError, UnauthorizedError } from "../errors/AppError.js";
-import { assertPermission, hasPermission, isAdmin } from "../utils/permissions.js";
+import {
+  assertPermission,
+  hasPermission,
+  hasPermissionSomewhere,
+  isAdmin,
+} from "../utils/permissions.js";
 
-/** Full admin or holder of the given permission (global grants). */
+/** Full admin or holder of the given permission (any warehouse for scoped grants). */
 export function requireAdminOrPermission(code: PermissionCode) {
   return (req: Request, _res: Response, next: NextFunction): void => {
     if (!req.user) {
       next(new UnauthorizedError());
       return;
     }
-    if (isAdmin(req.user) || hasPermission(req.user, code)) {
+    if (isAdmin(req.user) || hasPermissionSomewhere(req.user, code)) {
+      next();
+      return;
+    }
+    next(new ForbiddenError("You do not have permission to perform this action"));
+  };
+}
+
+/** Full admin or holder of every listed permission. */
+export function requireAdminOrAllPermissions(codes: PermissionCode[]) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      next(new UnauthorizedError());
+      return;
+    }
+    if (
+      isAdmin(req.user) ||
+      codes.every((code) => hasPermissionSomewhere(req.user!, code))
+    ) {
       next();
       return;
     }
@@ -61,6 +84,19 @@ export function requirePermission(
       return;
     }
 
+    if (
+      isWarehouseScopedPermission(code) &&
+      !warehouseId &&
+      options?.allowScopedWithoutWarehouseId
+    ) {
+      if (!hasPermissionSomewhere(req.user, code)) {
+        next(new ForbiddenError("You do not have permission to perform this action"));
+        return;
+      }
+      next();
+      return;
+    }
+
     assertPermission(req.user, code, warehouseId);
     next();
   };
@@ -95,9 +131,10 @@ export function requireAnyPermission(
       return;
     }
 
-    const allowed = codes.some((code) =>
-      hasPermission(req.user!, code, warehouseId)
-    );
+    const allowed =
+      !warehouseId && options?.allowScopedWithoutWarehouseId
+        ? codes.some((code) => hasPermissionSomewhere(req.user!, code))
+        : codes.some((code) => hasPermission(req.user!, code, warehouseId));
 
     if (!allowed) {
       next(new ForbiddenError("You do not have permission to perform this action"));

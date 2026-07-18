@@ -13,6 +13,10 @@ export function isAdmin(user: AuthUser): boolean {
   return user.role === UserRole.ADMIN;
 }
 
+/**
+ * Warehouse-scoped permissions require an explicit warehouseId (fail closed).
+ * Use {@link hasPermissionSomewhere} when checking "has this grant at any site".
+ */
 export function hasPermission(
   user: AuthUser,
   code: PermissionCode | string,
@@ -21,12 +25,22 @@ export function hasPermission(
   if (isAdmin(user)) return true;
 
   const grants = user.permissions ?? [];
-  return grants.some((g) => {
-    if (g.code !== code) return false;
-    if (!isWarehouseScopedPermission(code)) return true;
-    if (!warehouseId) return true;
-    return g.warehouseId === warehouseId;
-  });
+  if (isWarehouseScopedPermission(code)) {
+    if (!warehouseId) return false;
+    return grants.some(
+      (g) => g.code === code && g.warehouseId === warehouseId
+    );
+  }
+  return grants.some((g) => g.code === code);
+}
+
+/** True if the user holds the permission at any warehouse (or globally). */
+export function hasPermissionSomewhere(
+  user: AuthUser,
+  code: PermissionCode | string
+): boolean {
+  if (isAdmin(user)) return true;
+  return (user.permissions ?? []).some((g) => g.code === code);
 }
 
 export function hasAnyPermission(
@@ -35,6 +49,13 @@ export function hasAnyPermission(
   warehouseId?: string
 ): boolean {
   return codes.some((code) => hasPermission(user, code, warehouseId));
+}
+
+export function hasAnyPermissionSomewhere(
+  user: AuthUser,
+  codes: PermissionCode[]
+): boolean {
+  return codes.some((code) => hasPermissionSomewhere(user, code));
 }
 
 export function assertPermission(

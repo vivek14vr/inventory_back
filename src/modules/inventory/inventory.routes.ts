@@ -2,7 +2,10 @@ import { Router } from "express";
 import { Permission } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
-import { requireAdminOrPermission } from "../../shared/middleware/requirePermission.js";
+import {
+  requireAdminOrAllPermissions,
+  requireAdminOrPermission,
+} from "../../shared/middleware/requirePermission.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as inventoryAdminService from "./inventory.service.js";
@@ -21,6 +24,11 @@ import {
 const router = Router();
 
 router.use(authenticate);
+
+const requireInventoryAdjust = requireAdminOrAllPermissions([
+  Permission.INVENTORY_VIEW,
+  Permission.INVENTORY_ADJUST,
+]);
 
 router.get(
   "/dashboard",
@@ -91,7 +99,7 @@ router.get(
 
 router.patch(
   "/stock/threshold",
-  requireAdminOrPermission(Permission.INVENTORY_ADJUST),
+  requireInventoryAdjust,
   asyncHandler(async (req, res) => {
     const parsed = updateLowStockThresholdSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -107,7 +115,7 @@ router.patch(
 
 router.patch(
   "/stock",
-  requireAdminOrPermission(Permission.INVENTORY_ADJUST),
+  requireInventoryAdjust,
   asyncHandler(async (req, res) => {
     const parsed = adjustStockSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -177,7 +185,7 @@ router.get(
 
 router.patch(
   "/movements/:movementId/invoice",
-  requireAdminOrPermission(Permission.INVENTORY_ADJUST),
+  requireInventoryAdjust,
   asyncHandler(async (req, res) => {
     const parsed = updateMovementInvoiceSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -194,7 +202,7 @@ router.patch(
 
 router.delete(
   "/movements/:movementId/invoice",
-  requireAdminOrPermission(Permission.INVENTORY_ADJUST),
+  requireInventoryAdjust,
   asyncHandler(async (req, res) => {
     const result = await inventoryAdminService.deleteSaleInvoice(
       String(req.params.movementId),
