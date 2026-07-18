@@ -94,7 +94,7 @@ router.get(
 );
 
 router.get(
-  "/returns",
+  ["/returns", "/client-returns"],
   asyncHandler(async (req, res) => {
     const parsed = reportFilterSchema.safeParse(req.query);
     if (!parsed.success) {
