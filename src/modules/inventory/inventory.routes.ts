@@ -85,6 +85,29 @@ router.get(
 );
 
 router.get(
+  "/movements/:movementId/updates",
+  requireAdminOrPermission(Permission.INVENTORY_VIEW),
+  asyncHandler(async (req, res) => {
+    const data = await inventoryAdminService.listMovementInvoiceUpdates(
+      String(req.params.movementId)
+    );
+    sendSuccess(res, data);
+  })
+);
+
+/** Alias — same handler; avoids older proxies/deploys missing the nested path. */
+router.get(
+  "/invoice-updates/:movementId",
+  requireAdminOrPermission(Permission.INVENTORY_VIEW),
+  asyncHandler(async (req, res) => {
+    const data = await inventoryAdminService.listMovementInvoiceUpdates(
+      String(req.params.movementId)
+    );
+    sendSuccess(res, data);
+  })
+);
+
+router.get(
   "/low-stock",
   requireAdminOrPermission(Permission.INVENTORY_VIEW),
   asyncHandler(async (req, res) => {
@@ -169,17 +192,6 @@ router.get(
       parsed.data
     );
     sendSuccess(res, items, 200, { pagination });
-  })
-);
-
-router.get(
-  "/movements/:movementId/updates",
-  requireAdminOrPermission(Permission.INVENTORY_VIEW),
-  asyncHandler(async (req, res) => {
-    const data = await inventoryAdminService.listMovementInvoiceUpdates(
-      String(req.params.movementId)
-    );
-    sendSuccess(res, data);
   })
 );
 
