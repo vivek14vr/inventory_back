@@ -79,7 +79,9 @@ export type StockRow = {
   updatedAt: Date;
 };
 
-async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
+async function fetchStockRows(
+  query: StockFilters & { warehouseIds?: string[] }
+): Promise<StockRow[]> {
   const includeZero = query.includeZero !== false;
 
   const productFilter: Record<string, unknown> = { isActive: true };
@@ -91,7 +93,11 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
   }
 
   const warehouseFilter: Record<string, unknown> = { isActive: true };
-  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
+  if (query.warehouseIds && query.warehouseIds.length > 0) {
+    warehouseFilter._id = {
+      $in: query.warehouseIds.filter((id) => Types.ObjectId.isValid(id)),
+    };
+  } else if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
     warehouseFilter._id = query.warehouseId;
   }
 
@@ -104,9 +110,15 @@ async function fetchStockRows(query: StockFilters): Promise<StockRow[]> {
       .lean(),
     Warehouse.find(warehouseFilter).select("name code isActive").lean(),
     InventoryBalance.find({
-      ...(query.warehouseId && Types.ObjectId.isValid(query.warehouseId)
-        ? { warehouseId: query.warehouseId }
-        : {}),
+      ...(query.warehouseIds && query.warehouseIds.length > 0
+        ? {
+            warehouseId: {
+              $in: query.warehouseIds.filter((id) => Types.ObjectId.isValid(id)),
+            },
+          }
+        : query.warehouseId && Types.ObjectId.isValid(query.warehouseId)
+          ? { warehouseId: query.warehouseId }
+          : {}),
       ...(query.productId && Types.ObjectId.isValid(query.productId)
         ? { productId: query.productId }
         : {}),
@@ -306,7 +318,9 @@ const PRODUCT_SORT_FIELDS = {
     Math.max(...p.locations.map((l) => l.updatedAt.getTime()), 0),
 } as const;
 
-export async function listCurrentStock(query: StockQuery) {
+export async function listCurrentStock(
+  query: StockQuery & { warehouseIds?: string[] }
+) {
   let rows = await fetchStockRows(query);
   rows = filterBySearch(rows, query.search, [
     (r) => r.productName,
@@ -1129,11 +1143,17 @@ export async function adjustStockBalance(input: AdjustStockInput, user: AuthUser
   } = await balanceService.validateProductForBrand(input.productId, input.brandId);
 
   return runInTransaction(async (session) => {
+    const expected = await balanceService.getBalance(
+      input.warehouseId,
+      String(productId),
+      session
+    );
     const { previous, next, delta } = await balanceService.setBalance(
       input.warehouseId,
       String(productId),
       input.quantity,
-      session
+      session,
+      expected
     );
 
     if (delta !== 0) {

@@ -1,7 +1,11 @@
 import mongoose, { Types } from "mongoose";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
-import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
+import {
+  BadRequestError,
+  ConflictError,
+  NotFoundError,
+} from "../../shared/errors/AppError.js";
 import {
   assertNonNegativeIntegerQuantity,
   assertPositiveIntegerQuantity,
@@ -65,23 +69,52 @@ export async function adjustBalance(
   return next;
 }
 
+/**
+ * Absolute set with compare-and-swap on `expectedPrevious`. If concurrent
+ * stock-out/$inc changed the row, fails with Conflict so the caller can refresh.
+ */
 export async function setBalance(
   warehouseId: string,
   productId: string,
   quantity: number,
-  session?: mongoose.ClientSession | null
+  session?: mongoose.ClientSession | null,
+  expectedPrevious?: number
 ): Promise<{ previous: number; next: number; delta: number }> {
   assertNonNegativeIntegerQuantity(quantity, "Quantity");
 
-  // Atomic absolute set; returns the pre-update document so we can report the
-  // previous quantity and delta without a separate racy read.
-  const previousDoc = await InventoryBalance.findOneAndUpdate(
-    { warehouseId, productId },
+  const previous =
+    expectedPrevious ?? (await getBalance(warehouseId, productId, session));
+
+  if (previous === quantity) {
+    return { previous, next: quantity, delta: 0 };
+  }
+
+  const updated = await InventoryBalance.findOneAndUpdate(
+    { warehouseId, productId, quantity: previous },
     { $set: { quantity } },
-    { new: false, upsert: true, ...(session ? { session } : {}) }
+    { new: true, ...(session ? { session } : {}) }
   );
-  const previous = previousDoc?.quantity ?? 0;
-  return { previous, next: quantity, delta: quantity - previous };
+
+  if (updated) {
+    return { previous, next: quantity, delta: quantity - previous };
+  }
+
+  // No row yet and we expected zero — create it.
+  if (previous === 0) {
+    try {
+      await InventoryBalance.create(
+        [{ warehouseId, productId, quantity }],
+        session ? { session } : undefined
+      );
+      return { previous: 0, next: quantity, delta: quantity };
+    } catch (err: unknown) {
+      if ((err as { code?: number }).code !== 11000) throw err;
+    }
+  }
+
+  throw new ConflictError(
+    "Stock changed while adjusting. Refresh the balance and try again."
+  );
 }
 
 export async function assertSufficientStock(

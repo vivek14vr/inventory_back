@@ -35,7 +35,7 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportCurrentStock(parsed.data);
+    const data = await reportsService.reportCurrentStock(parsed.data, req.user!);
     if (req.query.format === "csv") {
       const type =
         parsed.data.groupBy === "warehouse"
@@ -58,10 +58,13 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportStockMovements({
-      ...parsed.data,
-      type: "STOCK_IN",
-    });
+    const data = await reportsService.reportStockMovements(
+      {
+        ...parsed.data,
+        type: "STOCK_IN",
+      },
+      req.user!
+    );
     if (req.query.format === "csv") {
       return handleExport("stock-in", data, res);
     }
@@ -76,10 +79,13 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportStockMovements({
-      ...parsed.data,
-      type: "STOCK_OUT",
-    });
+    const data = await reportsService.reportStockMovements(
+      {
+        ...parsed.data,
+        type: "STOCK_OUT",
+      },
+      req.user!
+    );
     if (req.query.format === "csv") {
       return handleExport("stock-out", data, res);
     }
@@ -94,7 +100,7 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportClientReturns(parsed.data);
+    const data = await reportsService.reportClientReturns(parsed.data, req.user!);
     if (req.query.format === "csv") {
       return handleExport("returns", data, res);
     }
@@ -109,7 +115,7 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportTransfers(parsed.data);
+    const data = await reportsService.reportTransfers(parsed.data, req.user!);
     if (req.query.format === "csv") {
       return handleExport("transfers", data, res);
     }
@@ -124,7 +130,7 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportSalesByClient(parsed.data);
+    const data = await reportsService.reportSalesByClient(parsed.data, req.user!);
     if (req.query.format === "csv") {
       return handleExport("sales-client", data, res);
     }
@@ -139,7 +145,7 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportSalesByInvoice(parsed.data);
+    const data = await reportsService.reportSalesByInvoice(parsed.data, req.user!);
     if (req.query.format === "csv") {
       return handleExport("sales-invoice", data, res);
     }
@@ -154,7 +160,7 @@ router.get(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const data = await reportsService.reportSalesByBrand(parsed.data);
+    const data = await reportsService.reportSalesByBrand(parsed.data, req.user!);
     if (req.query.format === "csv") {
       return handleExport("sales-brand", data, res);
     }

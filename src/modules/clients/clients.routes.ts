@@ -22,7 +22,7 @@ router.get(
       Permission.CLIENTS_VIEW,
       Permission.CLIENTS_MANAGE,
       Permission.STOCK_OUT,
-      Permission.STOCK_IN,
+      Permission.RETURNS_CLIENT,
       Permission.INVENTORY_VIEW,
       Permission.INVENTORY_ADJUST,
       Permission.REPORTS_VIEW,

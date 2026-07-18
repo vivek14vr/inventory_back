@@ -166,27 +166,29 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     id: "transfers",
     label: "Inter-warehouse transfers",
     description:
-      "Move stock between warehouses. View/receive are per warehouse; manage is company-wide.",
+      "Move stock between warehouses. Most staff only need View + Receive at their home warehouse.",
     warehouseScoped: true,
     permissions: [
       {
         code: Permission.TRANSFERS_VIEW,
         label: "View incoming transfers",
-        description: "See transfers that are on the way to the selected warehouse.",
-        example: "Goregaon staff see a shipment pending from the main depot.",
+        description:
+          "See shipments coming into this warehouse. Choose the warehouse below.",
+        example: "Goregaon staff see a shipment pending from Vasai.",
       },
       {
         code: Permission.TRANSFERS_RECEIVE,
         label: "Receive transfers",
-        description: "Confirm goods arrived and add them to warehouse stock.",
-        example: "Mark a 20-box transfer as received at Goregaon.",
+        description:
+          "Mark goods as arrived and add them to this warehouse’s stock.",
+        example: "Confirm a 20-box transfer arrived at Goregaon.",
       },
       {
         code: Permission.TRANSFERS_MANAGE,
-        label: "Manage all transfers (global)",
+        label: "Manage transfer history (every warehouse)",
         description:
-          "Full transfer control: history, status changes — not limited to one warehouse.",
-        example: "Cancel a stuck transfer or review transfer history company-wide.",
+          "Company-wide: see all transfer history and cancel/update stuck transfers. Creating a new transfer still needs Stock out at the source warehouse. Leave this off for normal warehouse staff — they only need View + Receive above.",
+        example: "Cancel a stuck Vasai → Goregaon transfer or review company-wide history.",
         warehouseScoped: false,
       },
     ],
@@ -373,17 +375,11 @@ export const ALL_PERMISSION_CODES: PermissionCode[] = PERMISSION_MODULES.flatMap
 /** Permissions that grant client return (invoice sold-qty correction). */
 export const CLIENT_RETURN_PERMISSIONS: PermissionCode[] = [
   Permission.RETURNS_CLIENT,
-  Permission.STOCK_IN,
-  Permission.STOCK_OUT,
 ];
 
 /** Permissions that grant warehouse transfer returns. */
 export const WAREHOUSE_RETURN_PERMISSIONS: PermissionCode[] = [
   Permission.RETURNS_WAREHOUSE,
-  Permission.TRANSFERS_MANAGE,
-  Permission.TRANSFERS_RECEIVE,
-  Permission.STOCK_IN,
-  Permission.STOCK_OUT,
 ];
 
 /** Permissions that grant reading warehouse stock balances. */
@@ -392,6 +388,25 @@ export const STOCK_BALANCE_READ_PERMISSIONS: PermissionCode[] = [
   Permission.STOCK_IN,
   Permission.STOCK_OUT,
 ];
+
+/**
+ * Company-wide / admin-power permissions that must not be granted to warehouse staff.
+ * Admins ignore grants entirely (full access by role).
+ */
+export const ADMIN_ONLY_PERMISSIONS: readonly PermissionCode[] = [
+  Permission.INVENTORY_VIEW,
+  Permission.INVENTORY_ADJUST,
+  Permission.INVENTORY_DASHBOARD,
+  Permission.IMPORTS_MANAGE,
+  Permission.AUDIT_VIEW,
+  Permission.TRANSFERS_MANAGE,
+  Permission.WAREHOUSES_MANAGE,
+  Permission.USERS_MANAGE,
+];
+
+export function isAdminOnlyPermission(code: string): boolean {
+  return (ADMIN_ONLY_PERMISSIONS as readonly string[]).includes(code);
+}
 
 /** Default bundle for legacy warehouse operators */
 export function defaultWarehouseOperatorPermissions(

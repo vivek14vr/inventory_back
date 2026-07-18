@@ -18,6 +18,8 @@ export interface IStockMovement extends Document {
   destinationWarehouseId?: Types.ObjectId;
   notes?: string;
   invoiceModificationCount?: number;
+  /** Atomically tracked client returns against this sale line. */
+  clientReturnedQuantity?: number;
   createdBy: Types.ObjectId;
   createdAt: Date;
 }
@@ -33,6 +35,7 @@ const stockMovementSchema = new Schema<IStockMovement>(
     clientName: { type: String, trim: true },
     invoiceNumber: { type: String, trim: true },
     invoiceModificationCount: { type: Number, default: 0, min: 0 },
+    clientReturnedQuantity: { type: Number, default: 0, min: 0 },
     transferId: { type: Schema.Types.ObjectId, ref: "Transfer" },
     relatedSaleMovementId: { type: Schema.Types.ObjectId, ref: "StockMovement" },
     destinationWarehouseId: { type: Schema.Types.ObjectId, ref: "Warehouse" },

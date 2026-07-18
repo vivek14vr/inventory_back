@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Permission, STOCK_BALANCE_READ_PERMISSIONS, CLIENT_RETURN_PERMISSIONS } from "../../shared/constants/permissions.js";
+import { Permission, STOCK_BALANCE_READ_PERMISSIONS } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
 import {
@@ -119,7 +119,7 @@ router.post(
 
 router.get(
   "/client-returns/invoices",
-  requireAnyPermission(CLIENT_RETURN_PERMISSIONS, {
+  requireAnyPermission([Permission.RETURNS_CLIENT], {
     warehouseIdFrom: "query",
     allowScopedWithoutWarehouseId: true,
   }),
@@ -138,7 +138,7 @@ router.get(
 
 router.get(
   "/client-returns/invoice",
-  requireAnyPermission(CLIENT_RETURN_PERMISSIONS, {
+  requireAnyPermission([Permission.RETURNS_CLIENT], {
     warehouseIdFrom: "query",
     allowScopedWithoutWarehouseId: true,
   }),
@@ -157,7 +157,7 @@ router.get(
 
 router.post(
   "/client-returns",
-  requireAnyPermission(CLIENT_RETURN_PERMISSIONS, {
+  requireAnyPermission([Permission.RETURNS_CLIENT], {
     warehouseIdFrom: "body",
     allowScopedWithoutWarehouseId: true,
   }),

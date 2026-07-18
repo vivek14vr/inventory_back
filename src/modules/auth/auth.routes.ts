@@ -2,6 +2,7 @@ import { Router } from "express";
 import { AuditLog } from "../../models/AuditLog.js";
 import { REFRESH_TOKEN_COOKIE } from "../../shared/constants/auth.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
+import { authRateLimiter } from "../../shared/middleware/rateLimit.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
@@ -22,12 +23,12 @@ function readRefreshToken(req: {
   return req.cookies?.[REFRESH_TOKEN_COOKIE] ?? req.body?.refreshToken;
 }
 
-/** Prefer body token — client storage updates on rotation; httpOnly cookie can lag behind the proxy. */
+/** Prefer httpOnly cookie — body token is legacy and should not be required. */
 function readRefreshTokenForRefresh(req: {
   cookies?: Record<string, string>;
   body?: { refreshToken?: string };
 }): string | undefined {
-  return req.body?.refreshToken ?? req.cookies?.[REFRESH_TOKEN_COOKIE];
+  return req.cookies?.[REFRESH_TOKEN_COOKIE] ?? req.body?.refreshToken;
 }
 
 function sendAuthTokens(
@@ -54,6 +55,7 @@ function sendAuthTokens(
 
 router.post(
   "/login",
+  authRateLimiter,
   asyncHandler(async (req, res) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -76,6 +78,7 @@ router.post(
 
 router.post(
   "/refresh",
+  authRateLimiter,
   asyncHandler(async (req, res) => {
     const parsed = refreshSchema.safeParse(req.body ?? {});
     if (!parsed.success) {

@@ -27,8 +27,17 @@ export function toPublicWarehouse(doc: {
   };
 }
 
-export async function listWarehouses(includeInactive = false) {
-  const filter = includeInactive ? {} : { isActive: true };
+export async function listWarehouses(
+  includeInactive = false,
+  warehouseIds?: string[] | null
+) {
+  const filter: Record<string, unknown> = includeInactive ? {} : { isActive: true };
+  if (warehouseIds) {
+    if (warehouseIds.length === 0) return [];
+    filter._id = {
+      $in: warehouseIds.map((id) => new Types.ObjectId(id)),
+    };
+  }
   const warehouses = await Warehouse.find(filter).sort({ name: 1 }).lean();
   return warehouses.map((w) => toPublicWarehouse(w));
 }

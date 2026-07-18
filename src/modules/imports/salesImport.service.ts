@@ -639,7 +639,7 @@ async function resolveClientForVoucher(
   },
   user: AuthUser,
   clients: Array<{ _id: Types.ObjectId; name: string; secondaryName?: string }>
-): Promise<{ clientName: string; created: boolean }> {
+): Promise<{ clientName: string; created: boolean; clientId?: string }> {
   if (voucher.clientAction === "merge") {
     const targetId = voucher.mergeTargetClientId;
     if (!targetId || !Types.ObjectId.isValid(targetId)) {
@@ -656,7 +656,7 @@ async function resolveClientForVoucher(
     if (!client) {
       throw new NotFoundError("Client not found");
     }
-    return { clientName: client.name, created: false };
+    return { clientName: client.name, created: false, clientId: String(client._id) };
   }
 
   const trimmed = voucher.clientName.trim();
@@ -680,7 +680,7 @@ async function resolveClientForVoucher(
           },
         }
       );
-      return { clientName: existing.name, created: false };
+      return { clientName: existing.name, created: false, clientId: String(existing._id) };
     }
     throw new BadRequestError(
       `Client "${trimmed}" already exists. Use "Use existing client" to merge into it instead.`
@@ -704,7 +704,7 @@ async function resolveClientForVoucher(
     userId: user.id,
     metadata: { name: trimmed, source: "sales_import" },
   });
-  return { clientName: created.name, created: true };
+  return { clientName: created.name, created: true, clientId: created.id };
 }
 
 async function resolveSalesImportLineProduct(
@@ -792,6 +792,36 @@ async function deactivateImportedProducts(productIds: string[]): Promise<void> {
     { _id: { $in: ids.map((id) => new Types.ObjectId(id)) } },
     { $set: { isActive: false } }
   );
+}
+
+async function deactivateImportedBrands(brandIds: string[]): Promise<void> {
+  const ids = brandIds.filter((id) => Types.ObjectId.isValid(id));
+  if (ids.length === 0) return;
+  await Brand.updateMany(
+    { _id: { $in: ids.map((id) => new Types.ObjectId(id)) } },
+    { $set: { isActive: false } }
+  );
+}
+
+async function deactivateImportedClients(clientIds: string[]): Promise<void> {
+  const ids = clientIds.filter((id) => Types.ObjectId.isValid(id));
+  if (ids.length === 0) return;
+  await Client.updateMany(
+    { _id: { $in: ids.map((id) => new Types.ObjectId(id)) } },
+    { $set: { isActive: false } }
+  );
+}
+
+async function rollbackSalesImportCreates(input: {
+  productIds?: string[];
+  brandIds?: string[];
+  clientIds?: string[];
+}): Promise<void> {
+  await Promise.all([
+    deactivateImportedProducts(input.productIds ?? []),
+    deactivateImportedBrands(input.brandIds ?? []),
+    deactivateImportedClients(input.clientIds ?? []),
+  ]);
 }
 
 type SalesImportVoucherLineValidation = {
@@ -908,6 +938,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     }
 
     let resolvedClientName = draftVoucher.clientName;
+    let voucherCreatedClientId: string | undefined;
 
     if (voucherErrors.length === 0) {
       try {
@@ -915,6 +946,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         resolvedClientName = resolvedClient.clientName;
         if (resolvedClient.created) {
           createdClientCount++;
+          voucherCreatedClientId = resolvedClient.clientId;
         }
       } catch (err) {
         voucherErrors.push(err instanceof Error ? err.message : "Client resolution failed");
@@ -959,6 +991,9 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     });
 
     if (lineValidations.length === 0) {
+      await rollbackSalesImportCreates({
+        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
+      });
       voucherResults.push({
         ...baseVoucher,
         status: "FAILED",
@@ -971,6 +1006,9 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       (entry) => entry.lineErrors.length > 0
     );
     if (hasValidationFailure) {
+      await rollbackSalesImportCreates({
+        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
+      });
       failedCount += rejectEntireVoucher(
         baseVoucher,
         lineValidations,
@@ -989,6 +1027,9 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       clientName: exactCaseInsensitiveRegex(baseVoucher.clientName),
     });
     if (duplicateInvoice) {
+      await rollbackSalesImportCreates({
+        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
+      });
       const duplicateMessage = `Invoice ${baseVoucher.invoiceNumber} for ${baseVoucher.clientName} was already imported at this warehouse`;
       failedCount += rejectEntireVoucher(
         baseVoucher,
@@ -1007,6 +1048,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         : "Sales import";
 
     const voucherCreatedProductIds: string[] = [];
+    const voucherCreatedBrandIds: string[] = [];
 
     try {
       const batchItems: Array<{ productId: string; brandId: string; quantity: number }> = [];
@@ -1023,6 +1065,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         );
         if (resolvedBrand.created) {
           createdBrandCount++;
+          voucherCreatedBrandIds.push(resolvedBrand.brandId);
         }
 
         const resolvedProduct = await resolveSalesImportLineProduct(
@@ -1086,7 +1129,11 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         movementCount: batchResult.movements.length,
       });
     } catch (err) {
-      await deactivateImportedProducts(voucherCreatedProductIds);
+      await rollbackSalesImportCreates({
+        productIds: voucherCreatedProductIds,
+        brandIds: voucherCreatedBrandIds,
+        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
+      });
       const message = err instanceof Error ? err.message : "Stock out failed";
       failedCount += rejectEntireVoucher(
         baseVoucher,

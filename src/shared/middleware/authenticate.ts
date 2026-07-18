@@ -2,7 +2,10 @@ import type { Request, Response, NextFunction } from "express";
 import { User } from "../../models/User.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { UnauthorizedError } from "../errors/AppError.js";
-import { defaultWarehouseOperatorPermissions } from "../constants/permissions.js";
+import {
+  isAdminOnlyPermission,
+  type PermissionGrant,
+} from "../constants/permissions.js";
 import { UserRole } from "../constants/roles.js";
 import type { AuthUser } from "../types/auth.js";
 import { verifyAccessToken } from "../utils/jwt.js";
@@ -24,22 +27,14 @@ export async function buildAuthUser(userId: string): Promise<AuthUser | null> {
     | null
     | undefined;
 
-  let permissions = (user.permissions ?? []).map((p) => ({
-    code: p.code,
+  let permissions: PermissionGrant[] = (user.permissions ?? []).map((p) => ({
+    code: p.code as PermissionGrant["code"],
     warehouseId: p.warehouseId ? String(p.warehouseId) : undefined,
   }));
 
-  if (
-    user.role === UserRole.WAREHOUSE_USER &&
-    permissions.length === 0 &&
-    warehouse
-  ) {
-    permissions = defaultWarehouseOperatorPermissions(String(warehouse._id)).map(
-      (p) => ({
-        code: p.code,
-        warehouseId: p.warehouseId,
-      })
-    );
+  // Fail closed: ignore admin-power grants on staff accounts (legacy mis-grants).
+  if (user.role !== UserRole.ADMIN) {
+    permissions = permissions.filter((p) => !isAdminOnlyPermission(p.code));
   }
 
   if (!warehouse) {

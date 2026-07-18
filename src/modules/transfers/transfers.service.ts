@@ -3,7 +3,7 @@ import type mongoose from "mongoose";
 import { AuditLog } from "../../models/AuditLog.js";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Transfer } from "../../models/Transfer.js";
-import { Permission, WAREHOUSE_RETURN_PERMISSIONS } from "../../shared/constants/permissions.js";
+import { Permission } from "../../shared/constants/permissions.js";
 import {
   StockMovementType,
   TransferStatus,
@@ -158,7 +158,7 @@ export async function listPendingTransfers(
 ) {
   const filter: Record<string, unknown> = { status: TransferStatus.PENDING };
 
-  if (isAdmin(user)) {
+  if (isAdmin(user) || hasPermission(user, Permission.TRANSFERS_MANAGE)) {
     if (warehouseId && Types.ObjectId.isValid(warehouseId)) {
       filter.$or = [
         { destinationWarehouseId: warehouseId },
@@ -169,7 +169,6 @@ export async function listPendingTransfers(
     const allowed = [
       ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_VIEW),
       ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_RECEIVE),
-      ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_MANAGE),
       ...getWarehouseIdsForPermission(user, Permission.RETURNS_WAREHOUSE),
     ];
     const unique = [...new Set(allowed)];
@@ -606,10 +605,7 @@ export async function updateTransferStatus(
 
 function canWarehouseReturnAt(user: AuthUser, warehouseId: string): boolean {
   if (isAdmin(user)) return true;
-  if (hasPermission(user, Permission.TRANSFERS_MANAGE)) return true;
-  return WAREHOUSE_RETURN_PERMISSIONS.filter(
-    (code) => code !== Permission.TRANSFERS_MANAGE
-  ).some((code) => hasPermission(user, code, warehouseId));
+  return hasPermission(user, Permission.RETURNS_WAREHOUSE, warehouseId);
 }
 
 function assertCanReturnTransfer(user: AuthUser, transfer: {

@@ -5,6 +5,7 @@ import helmet from "helmet";
 import morgan from "morgan";
 import { env } from "./config/env.js";
 import { createApiRouter } from "./routes/index.js";
+import { apiRateLimiter } from "./shared/middleware/rateLimit.js";
 import { notFoundHandler } from "./shared/middleware/notFound.js";
 import { errorHandler } from "./shared/middleware/errorHandler.js";
 
@@ -48,7 +49,7 @@ export function createApp() {
     });
   });
 
-  app.use(env.API_PREFIX, createApiRouter());
+  app.use(env.API_PREFIX, apiRateLimiter, createApiRouter());
   app.use(notFoundHandler);
   app.use(errorHandler);
 

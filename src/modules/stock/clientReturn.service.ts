@@ -8,7 +8,7 @@ import {
   StockMovementType,
 } from "../../shared/constants/roles.js";
 import {
-  CLIENT_RETURN_PERMISSIONS,
+  Permission,
 } from "../../shared/constants/permissions.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../shared/errors/AppError.js";
 import {
@@ -23,6 +23,7 @@ import { resolveWarehouseIdForAnyPermission } from "../../shared/utils/permissio
 import { paginateArray } from "../../shared/pagination/pagination.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import {
+  notInvoiceQtyCorrection,
   saleQuantityInventoryDelta,
   sumReturnedQuantityForSale,
 } from "./saleReturn.utils.js";
@@ -107,7 +108,7 @@ function resolveClientReturnWarehouseFilter(
   if (warehouseId) {
     const resolved = resolveWarehouseIdForAnyPermission(
       user,
-      CLIENT_RETURN_PERMISSIONS,
+      [Permission.RETURNS_CLIENT],
       warehouseId
     );
     return { warehouseId: new Types.ObjectId(resolved) };
@@ -119,7 +120,7 @@ function resolveClientReturnWarehouseFilter(
 
   const allowed = [
     ...new Set(
-      CLIENT_RETURN_PERMISSIONS.flatMap((code) =>
+      [Permission.RETURNS_CLIENT].flatMap((code) =>
         getWarehouseIdsForPermission(user, code)
       )
     ),
@@ -172,7 +173,7 @@ function saleWarehouseId(
 function assertCanReturnAtWarehouse(user: AuthUser, warehouseId: string): void {
   if (isAdmin(user)) return;
   if (
-    CLIENT_RETURN_PERMISSIONS.some((code) =>
+    [Permission.RETURNS_CLIENT].some((code) =>
       hasPermission(user, code, warehouseId)
     )
   ) {
@@ -270,7 +271,7 @@ export async function getClientReturnInvoice(
   const warehouseId = query.warehouseId
     ? resolveWarehouseIdForAnyPermission(
         user,
-        CLIENT_RETURN_PERMISSIONS,
+        [Permission.RETURNS_CLIENT],
         query.warehouseId
       )
     : undefined;
@@ -374,6 +375,7 @@ export async function listClientReturnInvoices(
       $match: {
         type: StockMovementType.STOCK_IN,
         relatedSaleMovementId: { $in: saleIds },
+        ...notInvoiceQtyCorrection,
       },
     },
     { $group: { _id: "$relatedSaleMovementId", total: { $sum: "$quantity" } } },
@@ -420,6 +422,7 @@ export async function listClientReturnInvoices(
           type: StockMovementType.STOCK_IN,
           relatedSaleMovementId: { $exists: false },
           $or: invoiceMatchers,
+          ...notInvoiceQtyCorrection,
         },
       },
       {
@@ -652,6 +655,58 @@ async function createReturnMovement(
   return { movementId: String(movement._id), balance: newQty };
 }
 
+async function syncAndClaimClientReturnQuantity(
+  sale: SaleMovementDoc,
+  quantity: number,
+  session: ClientSession | null
+): Promise<void> {
+  const ledgerReturned = await sumReturnedQuantity(sale, session);
+  await StockMovement.updateOne(
+    { _id: sale._id },
+    { $max: { clientReturnedQuantity: ledgerReturned } },
+    { session: session ?? undefined }
+  );
+
+  const claimed = await StockMovement.findOneAndUpdate(
+    {
+      _id: sale._id,
+      $expr: {
+        $lte: [
+          {
+            $add: [{ $ifNull: ["$clientReturnedQuantity", 0] }, quantity],
+          },
+          "$quantity",
+        ],
+      },
+    },
+    { $inc: { clientReturnedQuantity: quantity } },
+    { new: true, session: session ?? undefined }
+  );
+
+  if (!claimed) {
+    const latest = await StockMovement.findById(sale._id)
+      .session(session ?? null)
+      .lean();
+    const already = latest?.clientReturnedQuantity ?? ledgerReturned;
+    const returnable = Math.max(0, (latest?.quantity ?? sale.quantity) - already);
+    throw new BadRequestError(
+      `Cannot return ${quantity} — only ${returnable} remaining on this line`
+    );
+  }
+}
+
+async function releaseClientReturnQuantityClaim(
+  saleId: Types.ObjectId,
+  quantity: number,
+  session: ClientSession | null
+): Promise<void> {
+  await StockMovement.updateOne(
+    { _id: saleId },
+    { $inc: { clientReturnedQuantity: -quantity } },
+    { session: session ?? undefined }
+  );
+}
+
 async function returnSaleLine(
   saleMovementId: string,
   quantity: number,
@@ -662,16 +717,15 @@ async function returnSaleLine(
   const sale = await loadSaleMovement(saleMovementId, session);
   assertCanReturnAtWarehouse(user, saleWarehouseId(sale));
 
-  const returned = await sumReturnedQuantity(sale, session);
-  const returnable = sale.quantity - returned;
   assertPositiveIntegerQuantity(quantity, "Return quantity");
-  if (quantity > returnable) {
-    throw new BadRequestError(
-      `Cannot return ${quantity} — only ${returnable} remaining on this line`
-    );
-  }
+  await syncAndClaimClientReturnQuantity(sale, quantity, session);
 
-  return createReturnMovement(sale, quantity, user, notes, session);
+  try {
+    return await createReturnMovement(sale, quantity, user, notes, session);
+  } catch (err) {
+    await releaseClientReturnQuantityClaim(sale._id, quantity, session);
+    throw err;
+  }
 }
 
 export async function submitClientReturn(input: ClientReturnSubmitInput, user: AuthUser) {

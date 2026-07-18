@@ -2,6 +2,9 @@ import { Types } from "mongoose";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Transfer } from "../../models/Transfer.js";
 import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
+import { ForbiddenError } from "../../shared/errors/AppError.js";
+import type { AuthUser } from "../../shared/types/auth.js";
+import { isAdmin } from "../../shared/utils/permissions.js";
 import * as inventoryAdmin from "../inventory/inventory.service.js";
 import { INVOICE_QTY_CORRECTION_NOTE_PREFIX } from "../stock/saleReturn.utils.js";
 import type {
@@ -12,12 +15,72 @@ import type {
 } from "./reports.validation.js";
 import { buildDateFilter, toCsv } from "./reports.utils.js";
 
-function movementFilter(query: MovementReportQuery): Record<string, unknown> {
+/** Warehouses a staff user may see in reports (home + any scoped grant). */
+export function getStaffReportWarehouseIds(user: AuthUser): string[] {
+  const ids = new Set<string>();
+  if (user.warehouseId) ids.add(user.warehouseId);
+  for (const grant of user.permissions ?? []) {
+    if (grant.warehouseId) ids.add(grant.warehouseId);
+  }
+  return [...ids];
+}
+
+/**
+ * Resolve warehouse scope for reports.
+ * Admins: optional single warehouse filter.
+ * Staff: must be limited to their warehouses; omit → all allowed ($in).
+ */
+export function resolveReportWarehouseScope(
+  user: AuthUser,
+  requestedWarehouseId?: string
+): { warehouseId?: string; warehouseIds?: string[] } {
+  if (isAdmin(user)) {
+    if (requestedWarehouseId && Types.ObjectId.isValid(requestedWarehouseId)) {
+      return { warehouseId: requestedWarehouseId };
+    }
+    return {};
+  }
+
+  const allowed = getStaffReportWarehouseIds(user);
+  if (allowed.length === 0) {
+    throw new ForbiddenError("No warehouse access for reports");
+  }
+
+  if (requestedWarehouseId) {
+    if (!Types.ObjectId.isValid(requestedWarehouseId)) {
+      throw new ForbiddenError("Invalid warehouse");
+    }
+    if (!allowed.includes(requestedWarehouseId)) {
+      throw new ForbiddenError("You do not have access to this warehouse");
+    }
+    return { warehouseId: requestedWarehouseId };
+  }
+
+  if (allowed.length === 1) {
+    return { warehouseId: allowed[0] };
+  }
+  return { warehouseIds: allowed };
+}
+
+function applyWarehouseScope(
+  filter: Record<string, unknown>,
+  scope: { warehouseId?: string; warehouseIds?: string[] },
+  field = "warehouseId"
+): void {
+  if (scope.warehouseId) {
+    filter[field] = scope.warehouseId;
+  } else if (scope.warehouseIds?.length) {
+    filter[field] = { $in: scope.warehouseIds };
+  }
+}
+
+function movementFilter(
+  query: MovementReportQuery,
+  scope: { warehouseId?: string; warehouseIds?: string[] }
+): Record<string, unknown> {
   const filter: Record<string, unknown> = {};
   if (query.type) filter.type = query.type;
-  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
-    filter.warehouseId = query.warehouseId;
-  }
+  applyWarehouseScope(filter, scope);
   if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
     filter.brandId = query.brandId;
   }
@@ -29,9 +92,14 @@ function movementFilter(query: MovementReportQuery): Record<string, unknown> {
   return filter;
 }
 
-export async function reportCurrentStock(query: StockReportQuery) {
+export async function reportCurrentStock(
+  query: StockReportQuery,
+  user: AuthUser
+) {
+  const scope = resolveReportWarehouseScope(user, query.warehouseId);
   const data = await inventoryAdmin.listCurrentStock({
-    warehouseId: query.warehouseId,
+    warehouseId: scope.warehouseId,
+    warehouseIds: scope.warehouseIds,
     brandId: query.brandId,
     productId: query.productId,
     includeZero: false,
@@ -93,8 +161,12 @@ export async function reportCurrentStock(query: StockReportQuery) {
   };
 }
 
-export async function reportStockMovements(query: MovementReportQuery) {
-  const filter = movementFilter(query);
+export async function reportStockMovements(
+  query: MovementReportQuery,
+  user: AuthUser
+) {
+  const scope = resolveReportWarehouseScope(user, query.warehouseId);
+  const filter = movementFilter(query, scope);
   const movements = await StockMovement.find(filter)
     .sort({ createdAt: -1 })
     .limit(query.limit)
@@ -139,7 +211,8 @@ export async function reportStockMovements(query: MovementReportQuery) {
   };
 }
 
-export async function reportClientReturns(query: ReportFilter) {
+export async function reportClientReturns(query: ReportFilter, user: AuthUser) {
+  const scope = resolveReportWarehouseScope(user, query.warehouseId);
   const filter: Record<string, unknown> = {
     type: StockMovementType.STOCK_IN,
     $and: [
@@ -160,9 +233,7 @@ export async function reportClientReturns(query: ReportFilter) {
     ],
   };
 
-  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
-    filter.warehouseId = query.warehouseId;
-  }
+  applyWarehouseScope(filter, scope);
   if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
     filter.brandId = query.brandId;
   }
@@ -215,13 +286,22 @@ export async function reportClientReturns(query: ReportFilter) {
   };
 }
 
-export async function reportTransfers(query: TransferReportQuery) {
+export async function reportTransfers(
+  query: TransferReportQuery,
+  user: AuthUser
+) {
+  const scope = resolveReportWarehouseScope(user, query.warehouseId);
   const filter: Record<string, unknown> = {};
   if (query.status) filter.status = query.status;
-  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
+  if (scope.warehouseId) {
     filter.$or = [
-      { sourceWarehouseId: query.warehouseId },
-      { destinationWarehouseId: query.warehouseId },
+      { sourceWarehouseId: scope.warehouseId },
+      { destinationWarehouseId: scope.warehouseId },
+    ];
+  } else if (scope.warehouseIds?.length) {
+    filter.$or = [
+      { sourceWarehouseId: { $in: scope.warehouseIds } },
+      { destinationWarehouseId: { $in: scope.warehouseIds } },
     ];
   }
   if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
@@ -271,15 +351,14 @@ export async function reportTransfers(query: TransferReportQuery) {
   };
 }
 
-async function salesMovements(query: ReportFilter) {
+async function salesMovements(query: ReportFilter, user: AuthUser) {
+  const scope = resolveReportWarehouseScope(user, query.warehouseId);
   const filter: Record<string, unknown> = {
     type: StockMovementType.STOCK_OUT,
     dispatchType: DispatchType.DIRECT_SELLING,
   };
 
-  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
-    filter.warehouseId = query.warehouseId;
-  }
+  applyWarehouseScope(filter, scope);
   if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
     filter.brandId = query.brandId;
   }
@@ -325,8 +404,8 @@ function salesMovementLine(m: Awaited<ReturnType<typeof salesMovements>>[number]
   };
 }
 
-export async function reportSalesByClient(query: ReportFilter) {
-  const movements = await salesMovements(query);
+export async function reportSalesByClient(query: ReportFilter, user: AuthUser) {
+  const movements = await salesMovements(query, user);
   const grouped = new Map<
     string,
     {
@@ -396,8 +475,8 @@ export async function reportSalesByClient(query: ReportFilter) {
   };
 }
 
-export async function reportSalesByInvoice(query: ReportFilter) {
-  const movements = await salesMovements(query);
+export async function reportSalesByInvoice(query: ReportFilter, user: AuthUser) {
+  const movements = await salesMovements(query, user);
   const grouped = new Map<
     string,
     {
@@ -457,8 +536,8 @@ export async function reportSalesByInvoice(query: ReportFilter) {
   };
 }
 
-export async function reportSalesByBrand(query: ReportFilter) {
-  const movements = await salesMovements(query);
+export async function reportSalesByBrand(query: ReportFilter, user: AuthUser) {
+  const movements = await salesMovements(query, user);
   const grouped = new Map<
     string,
     {

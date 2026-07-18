@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Permission, WAREHOUSE_RETURN_PERMISSIONS } from "../../shared/constants/permissions.js";
+import { Permission } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
 import {
@@ -92,7 +92,7 @@ router.patch(
 router.post(
   "/:id/return",
   authenticate,
-  requireAnyPermission(WAREHOUSE_RETURN_PERMISSIONS, { allowScopedWithoutWarehouseId: true }),
+  requireAnyPermission([Permission.RETURNS_WAREHOUSE], { allowScopedWithoutWarehouseId: true }),
   asyncHandler(async (req, res) => {
     const parsed = returnTransferSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -110,7 +110,7 @@ router.post(
 router.post(
   "/:id/return-in-transit",
   authenticate,
-  requireAnyPermission(WAREHOUSE_RETURN_PERMISSIONS, { allowScopedWithoutWarehouseId: true }),
+  requireAnyPermission([Permission.RETURNS_WAREHOUSE], { allowScopedWithoutWarehouseId: true }),
   asyncHandler(async (req, res) => {
     const parsed = returnTransferSchema.safeParse(req.body);
     if (!parsed.success) {

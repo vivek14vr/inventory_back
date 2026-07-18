@@ -41,3 +41,13 @@ export function getAccessibleWarehouseIds(
   if (isAdmin(user)) return null;
   return getWarehouseIdsForPermission(user, permission);
 }
+
+/** Union of home warehouse + every warehouseId on the user's grants. */
+export function getStaffVisibleWarehouseIds(user: AuthUser): string[] {
+  const ids = new Set<string>();
+  if (user.warehouseId) ids.add(user.warehouseId);
+  for (const grant of user.permissions ?? []) {
+    if (grant.warehouseId) ids.add(grant.warehouseId);
+  }
+  return Array.from(ids);
+}
