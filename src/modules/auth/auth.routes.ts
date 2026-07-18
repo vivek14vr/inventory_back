@@ -43,10 +43,10 @@ function sendAuthTokens(
 ) {
   setAccessTokenCookie(res, result.accessToken);
   setRefreshTokenCookie(res, result.refreshToken);
+  // Refresh token is httpOnly-only — never return it in JSON (XSS-readable).
   sendSuccess(res, {
     accessToken: result.accessToken,
     accessTokenExpiresIn: result.accessTokenExpiresIn,
-    refreshToken: result.refreshToken,
     refreshTokenExpiresIn: result.refreshTokenExpiresIn,
     token: result.accessToken,
     user: result.user,

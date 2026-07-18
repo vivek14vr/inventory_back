@@ -65,16 +65,25 @@ export function createRateLimiter(options: RateLimitOptions) {
   };
 }
 
-/** Login / refresh — keyed by IP using anonymous limits. */
+/** Login / refresh — keyed by IP with a stricter login budget. */
 export const authRateLimiter = createRateLimiter({
   name: "auth",
   windowMs: env.RATE_LIMIT_WINDOW_MS,
-  max: env.RATE_LIMIT_MAX_ANONYMOUS,
+  max: env.RATE_LIMIT_MAX_LOGIN,
 });
 
-/** General API traffic — keyed by IP (user is not available until authenticate). */
-export const apiRateLimiter = createRateLimiter({
+const apiLimiterInner = createRateLimiter({
   name: "api",
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   max: env.RATE_LIMIT_MAX_AUTHENTICATED,
 });
+
+/** General API traffic — keyed by IP (user is not available until authenticate). */
+export function apiRateLimiter(req: Request, res: Response, next: NextFunction): void {
+  // Health probes must not consume or trip the general budget.
+  if (req.path === "/health" || req.path.endsWith("/health")) {
+    next();
+    return;
+  }
+  apiLimiterInner(req, res, next);
+}

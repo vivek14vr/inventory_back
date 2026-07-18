@@ -19,6 +19,8 @@ const envSchema = z.object({
   RATE_LIMIT_MAX_AUTHENTICATED: z.coerce.number().int().min(100).default(20_000),
   /** Max requests per window per IP for login / unauthenticated traffic. */
   RATE_LIMIT_MAX_ANONYMOUS: z.coerce.number().int().min(50).default(1_000),
+  /** Stricter cap for /auth/login and /auth/refresh (default 40 / 15 min). */
+  RATE_LIMIT_MAX_LOGIN: z.coerce.number().int().min(5).default(40),
   /** Set to "true" to disable API rate limiting (not recommended in production). */
   RATE_LIMIT_DISABLED: z.coerce.boolean().default(false),
 });

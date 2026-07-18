@@ -13,6 +13,7 @@ export interface ISalesInvoiceClaim extends Document {
   movementIds: Types.ObjectId[];
   failureMessage?: string;
   processingExpiresAt?: Date;
+  completedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -40,6 +41,7 @@ const salesInvoiceClaimSchema = new Schema<ISalesInvoiceClaim>(
     },
     failureMessage: { type: String },
     processingExpiresAt: { type: Date },
+    completedAt: { type: Date },
   },
   { timestamps: true }
 );

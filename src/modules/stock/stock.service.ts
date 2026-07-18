@@ -708,6 +708,7 @@ export async function stockOut(input: StockOutInput, user: AuthUser) {
         $set: {
           status: "COMPLETED",
           movementIds: [txnResult.movementId],
+          completedAt: new Date(),
         },
         $unset: { processingExpiresAt: 1, failureMessage: 1 },
       }
@@ -1029,6 +1030,7 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
         $set: {
           status: "COMPLETED",
           movementIds: txnResult.movementIds,
+          completedAt: new Date(),
         },
         $unset: { processingExpiresAt: 1, failureMessage: 1 },
       }
