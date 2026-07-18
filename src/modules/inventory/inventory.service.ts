@@ -819,18 +819,38 @@ export async function listMovementHistory(query: MovementsQuery) {
       .lean(),
   ]);
 
-  const balanceKeys = new Map<string, { warehouseId: Types.ObjectId; productId: Types.ObjectId }>();
-  for (const m of movements as MovementDoc[]) {
+  const pageMovements = movements as MovementDoc[];
+
+  /** Per warehouse+product: current on-hand qty and oldest createdAt on this page. */
+  const pairState = new Map<
+    string,
+    {
+      warehouseId: Types.ObjectId;
+      productId: Types.ObjectId;
+      oldestCreatedAt: Date;
+    }
+  >();
+
+  for (const m of pageMovements) {
     const warehouseId = extractObjectId(m.warehouseId);
     const productId = extractObjectId(m.productId);
     if (!warehouseId || !productId) continue;
-    balanceKeys.set(`${warehouseId}:${productId}`, {
-      warehouseId: new Types.ObjectId(warehouseId),
-      productId: new Types.ObjectId(productId),
-    });
+    const key = `${warehouseId}:${productId}`;
+    const createdAt =
+      m.createdAt instanceof Date ? m.createdAt : new Date(m.createdAt);
+    const existing = pairState.get(key);
+    if (!existing) {
+      pairState.set(key, {
+        warehouseId: new Types.ObjectId(warehouseId),
+        productId: new Types.ObjectId(productId),
+        oldestCreatedAt: createdAt,
+      });
+    } else if (createdAt < existing.oldestCreatedAt) {
+      existing.oldestCreatedAt = createdAt;
+    }
   }
 
-  const balancePairs = Array.from(balanceKeys.values());
+  const balancePairs = Array.from(pairState.values());
   const balances =
     balancePairs.length === 0
       ? []
@@ -852,14 +872,38 @@ export async function listMovementHistory(query: MovementsQuery) {
     ])
   );
 
-  const items = (movements as MovementDoc[]).map((m) => {
+  // Remaining stock must be balance-after each movement, not the live on-hand
+  // qty pasted onto every row (which made consecutive +400s look unchanged).
+  const remainingByMovementId = new Map<string, number>();
+
+  await Promise.all(
+    balancePairs.map(async (pair) => {
+      const key = `${String(pair.warehouseId)}:${String(pair.productId)}`;
+      const currentQuantity = balanceByKey.get(key) ?? 0;
+      const ledgerMovements = (await StockMovement.find({
+        warehouseId: pair.warehouseId,
+        productId: pair.productId,
+        createdAt: { $gte: pair.oldestCreatedAt },
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .lean()) as MovementDoc[];
+
+      const ledger = applyRunningBalances(currentQuantity, ledgerMovements);
+      for (const entry of ledger) {
+        remainingByMovementId.set(entry.id, entry.balanceAfter);
+      }
+    })
+  );
+
+  const items = pageMovements.map((m) => {
     const row = mapMovementRow(m);
     const key =
       row.warehouse?.id && row.product?.id
         ? `${row.warehouse.id}:${row.product.id}`
         : null;
-    // Always send a number so the UI never treats remaining stock as "missing".
-    const remainingStock = key ? (balanceByKey.get(key) ?? 0) : 0;
+    const remainingStock =
+      remainingByMovementId.get(row.id) ??
+      (key ? (balanceByKey.get(key) ?? 0) : 0);
     return { ...row, remainingStock };
   });
 
@@ -1553,14 +1597,13 @@ export type InvoiceGroup = {
 async function resolveInvoiceMovementFilter(
   query: Pick<InvoiceListQuery, "search" | "warehouseId" | "clientId">
 ) {
+  // Only live client sales. Returns and quantity-correction ledger rows are excluded —
+  // sale lines already hold the latest editable quantities.
   const filter: Record<string, unknown> = {
     $and: [
       {
-        $or: [
-          { dispatchType: DispatchType.DIRECT_SELLING },
-          { invoiceNumber: { $exists: true, $nin: [null, ""] } },
-          { clientName: { $exists: true, $nin: [null, ""] } },
-        ],
+        type: StockMovementType.STOCK_OUT,
+        dispatchType: DispatchType.DIRECT_SELLING,
       },
       {
         notes: {

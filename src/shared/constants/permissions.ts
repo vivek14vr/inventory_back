@@ -57,63 +57,112 @@ export type PermissionDefinition = {
   warehouseScoped?: boolean;
 };
 
+export type PermissionNavGroup = "main" | "more";
+
 export type PermissionModuleDefinition = {
   id: string;
   label: string;
   description: string;
   warehouseScoped: boolean;
+  /** Matches sidebar: Main menu vs More. */
+  navGroup: PermissionNavGroup;
   permissions: PermissionDefinition[];
 };
 
+/**
+ * Access-grant catalog aligned with sidebar modules (admin layout / staff nav).
+ * Permission codes stay stable so existing grants keep working.
+ */
 export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
   {
-    id: "dashboard",
-    label: "Home dashboard",
-    description:
-      "Landing page with quick links and summary cards for the user’s warehouse.",
+    id: "home",
+    label: "Home",
+    description: "Landing page with shortcuts and summary for the user’s warehouse.",
     warehouseScoped: false,
+    navGroup: "main",
     permissions: [
       {
         code: Permission.DASHBOARD_VIEW,
-        label: "View home dashboard",
+        label: "View Home",
         description: "Open the Home screen after login.",
-        example: "See today’s shortcuts and warehouse overview on the Home page.",
+        example: "See today’s shortcuts and warehouse overview on Home.",
+      },
+      {
+        code: Permission.INVENTORY_DASHBOARD,
+        label: "Admin Home stats",
+        description: "Company-wide totals, low stock, and transfer activity on admin Home.",
+        example: "See company-wide low-stock alerts on the admin Home page.",
       },
     ],
   },
   {
-    id: "stock",
-    label: "Stock operations",
-    description:
-      "Day-to-day stock movements at a specific warehouse. Each grant applies to one warehouse only.",
+    id: "stock-in",
+    label: "Stock In",
+    description: "Record goods received at a warehouse. Each grant is for one location.",
     warehouseScoped: true,
+    navGroup: "main",
     permissions: [
-      {
-        code: Permission.STOCK_VIEW,
-        label: "View stock balances",
-        description: "See how much of each product is on hand at the warehouse.",
-        example: "Check that Goregaon has 40 boxes of Product A before dispatch.",
-      },
       {
         code: Permission.STOCK_IN,
         label: "Record stock in",
-        description: "Add stock when goods arrive or are returned.",
+        description: "Add stock when goods arrive or are put back into inventory.",
         example: "Log 50 cartons received from the factory into Goregaon.",
       },
+    ],
+  },
+  {
+    id: "stock-out",
+    label: "Stock Out",
+    description:
+      "Record sales and other issues from a warehouse. Also required to create a transfer from that warehouse.",
+    warehouseScoped: true,
+    navGroup: "main",
+    permissions: [
       {
         code: Permission.STOCK_OUT,
         label: "Record stock out",
-        description: "Remove stock for sales, samples, or other issues.",
+        description: "Remove stock for sales, samples, or transfers out.",
         example: "Sell 10 boxes to a client and attach an invoice number.",
       },
     ],
   },
   {
-    id: "returns",
-    label: "Returns",
+    id: "transfer",
+    label: "Transfer",
     description:
-      "Process goods returned from clients (invoice corrections) or sent back between warehouses.",
+      "Move stock between warehouses. Covers Transfer and Transfer History in the menu. Most staff only need View + Receive at their home warehouse; creating a send still needs Stock Out at the source.",
     warehouseScoped: true,
+    navGroup: "main",
+    permissions: [
+      {
+        code: Permission.TRANSFERS_VIEW,
+        label: "View transfers",
+        description: "See shipments for this warehouse (Transfer page and Transfer History).",
+        example: "Goregaon staff see a shipment pending from Vasai.",
+      },
+      {
+        code: Permission.TRANSFERS_RECEIVE,
+        label: "Receive transfers",
+        description: "Mark goods as arrived and add them to this warehouse’s stock.",
+        example: "Confirm a 20-box transfer arrived at Goregaon.",
+      },
+      {
+        code: Permission.TRANSFERS_MANAGE,
+        label: "Manage all transfer history",
+        description:
+          "Company-wide: review every warehouse’s history and cancel or update stuck transfers.",
+        example: "Cancel a stuck Vasai → Goregaon transfer.",
+        warehouseScoped: false,
+      },
+    ],
+  },
+  {
+    id: "return",
+    label: "Return",
+    description:
+      "Client invoice returns and warehouse transfer returns at a specific location.",
+    warehouseScoped: true,
+    navGroup: "main",
     permissions: [
       {
         code: Permission.RETURNS_CLIENT,
@@ -134,62 +183,96 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     ],
   },
   {
-    id: "inventory",
-    label: "Inventory & invoices",
+    id: "check-stock",
+    label: "Check Stock",
     description:
-      "Company-wide stock visibility, movement history, quantity corrections, and invoice fixes.",
-    warehouseScoped: false,
+      "See on-hand balances at a warehouse. Company-wide inventory browse lives under Invoices for admins.",
+    warehouseScoped: true,
+    navGroup: "main",
     permissions: [
       {
-        code: Permission.INVENTORY_DASHBOARD,
-        label: "View admin inventory dashboard",
-        description: "Access admin Home stats: totals, low stock, and transfer activity.",
-        example: "See company-wide low-stock alerts on the admin Home page.",
+        code: Permission.STOCK_VIEW,
+        label: "View stock at warehouse",
+        description: "See how much of each product is on hand at the warehouse.",
+        example: "Check that Goregaon has 40 boxes of Product A before dispatch.",
       },
+    ],
+  },
+  {
+    id: "invoices",
+    label: "Invoices",
+    description:
+      "Sale invoices, quantity corrections, and company-wide inventory. Needs both actions below for the menu item.",
+    warehouseScoped: false,
+    navGroup: "main",
+    permissions: [
       {
         code: Permission.INVENTORY_VIEW,
-        label: "Browse inventory & movements",
+        label: "Browse inventory & invoices",
         description:
-          "Open Check Stock and movement history across all warehouses (company-wide).",
-        example: "Look up Product B stock in every warehouse and recent movements.",
+          "Open Check Stock / movements across all warehouses and the Invoices list.",
+        example: "Look up Product B stock in every warehouse or search an invoice.",
       },
       {
         code: Permission.INVENTORY_ADJUST,
         label: "Adjust quantities & fix invoices",
         description:
-          "Change on-hand quantities, correct wrong invoice numbers, and update sold quantities on invoices.",
-        example: "Fix a typo on invoice #1042 or delete a duplicate sale that restored stock.",
+          "Change on-hand quantities, correct wrong invoice numbers, and update sold quantities.",
+        example: "Fix a typo on invoice #1042 or delete a duplicate sale.",
       },
     ],
   },
   {
-    id: "transfers",
-    label: "Inter-warehouse transfers",
-    description:
-      "Move stock between warehouses. Most staff only need View + Receive at their home warehouse.",
-    warehouseScoped: true,
+    id: "reports",
+    label: "Reports",
+    description: "Operational reports and CSV downloads.",
+    warehouseScoped: false,
+    navGroup: "main",
     permissions: [
       {
-        code: Permission.TRANSFERS_VIEW,
-        label: "View incoming transfers",
+        code: Permission.REPORTS_VIEW,
+        label: "View & export reports",
+        description: "Open Reports and download CSV exports.",
+        example: "Export monthly stock movement report for accounting.",
+      },
+    ],
+  },
+  {
+    id: "imports",
+    label: "Imports",
+    description:
+      "Bulk import product catalog, Tally sales register (direct sell), and legacy tally deductions.",
+    warehouseScoped: false,
+    navGroup: "more",
+    permissions: [
+      {
+        code: Permission.IMPORTS_MANAGE,
+        label: "Manage imports",
         description:
-          "See shipments coming into this warehouse. Choose the warehouse below.",
-        example: "Goregaon staff see a shipment pending from Vasai.",
+          "Upload product catalog Excel, sales register Excel, and legacy tally deduction files.",
+        example:
+          "Import a product catalog spreadsheet or backfill Tally sales as stock-out.",
+      },
+    ],
+  },
+  {
+    id: "products",
+    label: "Products",
+    description: "Product catalogue: names, units, low-stock thresholds, and brand link.",
+    warehouseScoped: false,
+    navGroup: "more",
+    permissions: [
+      {
+        code: Permission.PRODUCTS_VIEW,
+        label: "View products",
+        description: "Open the Products page and product detail.",
+        example: "Look up pack size and low-stock threshold for Product C.",
       },
       {
-        code: Permission.TRANSFERS_RECEIVE,
-        label: "Receive transfers",
-        description:
-          "Mark goods as arrived and add them to this warehouse’s stock.",
-        example: "Confirm a 20-box transfer arrived at Goregaon.",
-      },
-      {
-        code: Permission.TRANSFERS_MANAGE,
-        label: "Manage transfer history (every warehouse)",
-        description:
-          "Company-wide: see all transfer history and cancel/update stuck transfers. Creating a new transfer still needs Stock out at the source warehouse. Leave this off for normal warehouse staff — they only need View + Receive above.",
-        example: "Cancel a stuck Vasai → Goregaon transfer or review company-wide history.",
-        warehouseScoped: false,
+        code: Permission.PRODUCTS_MANAGE,
+        label: "Create & edit products",
+        description: "Add products, set stock units, thresholds, and active status.",
+        example: "Create “Widget XL” with 800 kg per box and threshold 5 boxes.",
       },
     ],
   },
@@ -198,6 +281,7 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     label: "Warehouses",
     description: "Master list of storage locations (names, codes, active/inactive).",
     warehouseScoped: false,
+    navGroup: "more",
     permissions: [
       {
         code: Permission.WAREHOUSES_VIEW,
@@ -218,6 +302,7 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     label: "Brands",
     description: "Product brands used to group the catalogue.",
     warehouseScoped: false,
+    navGroup: "more",
     permissions: [
       {
         code: Permission.BRANDS_VIEW,
@@ -238,6 +323,7 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     label: "Clients",
     description: "Customer master list with primary and secondary names.",
     warehouseScoped: false,
+    navGroup: "more",
     permissions: [
       {
         code: Permission.CLIENTS_VIEW,
@@ -254,61 +340,11 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     ],
   },
   {
-    id: "products",
-    label: "Products",
-    description: "Product catalogue: names, units, low-stock thresholds, and brand link.",
-    warehouseScoped: false,
-    permissions: [
-      {
-        code: Permission.PRODUCTS_VIEW,
-        label: "View products",
-        description: "Open the Products page and product detail.",
-        example: "Look up pack size and low-stock threshold for Product C.",
-      },
-      {
-        code: Permission.PRODUCTS_MANAGE,
-        label: "Create & edit products",
-        description: "Add products, set stock units, thresholds, and active status.",
-        example: "Create “Widget XL” with 800 kg per box and threshold 5 boxes.",
-      },
-    ],
-  },
-  {
-    id: "reports",
-    label: "Reports",
-    description: "Operational reports and CSV downloads.",
-    warehouseScoped: false,
-    permissions: [
-      {
-        code: Permission.REPORTS_VIEW,
-        label: "View & export reports",
-        description: "Open Reports and download CSV exports.",
-        example: "Export monthly stock movement report for accounting.",
-      },
-    ],
-  },
-  {
-    id: "imports",
-    label: "Imports",
-    description:
-      "Bulk import product catalog, Tally sales register (direct sell), and legacy tally stock deductions.",
-    warehouseScoped: false,
-    permissions: [
-      {
-        code: Permission.IMPORTS_MANAGE,
-        label: "Manage imports",
-        description:
-          "Upload product catalog Excel, sales register Excel, and legacy tally deduction files.",
-        example:
-          "Import a product catalog spreadsheet or backfill Tally sales as stock-out.",
-      },
-    ],
-  },
-  {
     id: "users",
-    label: "Users & access",
+    label: "Users",
     description: "Create staff accounts and grant or revoke module permissions.",
     warehouseScoped: false,
+    navGroup: "more",
     permissions: [
       {
         code: Permission.USERS_MANAGE,
@@ -320,24 +356,12 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     ],
   },
   {
-    id: "audit",
-    label: "Activity log",
-    description: "Read-only trail of who did what across the system.",
+    id: "daily-checklists",
+    label: "Daily Checklists",
+    description:
+      "Recurring warehouse tasks. Also unlocks Notifications in the menu.",
     warehouseScoped: false,
-    permissions: [
-      {
-        code: Permission.AUDIT_VIEW,
-        label: "View activity log",
-        description: "See audit entries including permission changes and stock movements.",
-        example: "Review who granted Stock Out access to a user yesterday.",
-      },
-    ],
-  },
-  {
-    id: "checklists",
-    label: "Daily checklists",
-    description: "Recurring task lists for warehouse staff and supervisors.",
-    warehouseScoped: false,
+    navGroup: "more",
     permissions: [
       {
         code: Permission.CHECKLISTS_MANAGE,
@@ -348,8 +372,23 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
       {
         code: Permission.CHECKLISTS_COMPLETE,
         label: "Complete daily tasks",
-        description: "Tick off assigned tasks and receive notifications.",
+        description: "Tick off assigned tasks and receive related notifications.",
         example: "Mark “Count cash drawer” done before the morning deadline.",
+      },
+    ],
+  },
+  {
+    id: "activity-log",
+    label: "Activity Log",
+    description: "Read-only trail of who did what across the system.",
+    warehouseScoped: false,
+    navGroup: "more",
+    permissions: [
+      {
+        code: Permission.AUDIT_VIEW,
+        label: "View activity log",
+        description: "See audit entries including permission changes and stock movements.",
+        example: "Review who granted Stock Out access to a user yesterday.",
       },
     ],
   },

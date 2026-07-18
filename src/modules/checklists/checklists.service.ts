@@ -6,6 +6,11 @@ import { User } from "../../models/User.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { buildChecklistAuditMetadata } from "../../shared/utils/auditMetadata.js";
+import {
+  formatChecklistSchedule,
+  isChecklistScheduledOn,
+  type ChecklistScheduleFields,
+} from "../../shared/utils/checklistSchedule.js";
 import { isAdmin } from "../../shared/utils/permissions.js";
 import type { CreateChecklistInput, UpdateChecklistInput } from "./checklists.validation.js";
 import { resolveTaskNotifications } from "../notifications/checklistReminders.js";
@@ -28,6 +33,9 @@ export function isPastDueTime(dueTime?: string, at: Date = new Date()): boolean 
 }
 
 function mapChecklist(doc: IChecklist) {
+  const frequency = doc.frequency ?? "daily";
+  const weekdays = doc.weekdays?.length ? doc.weekdays : undefined;
+  const dayOfMonth = doc.dayOfMonth ?? undefined;
   return {
     id: String(doc._id),
     title: doc.title,
@@ -41,6 +49,10 @@ function mapChecklist(doc: IChecklist) {
         dueTime: t.dueTime,
       }))
       .sort((a, b) => a.sortOrder - b.sortOrder),
+    frequency,
+    weekdays,
+    dayOfMonth,
+    scheduleLabel: formatChecklistSchedule({ frequency, weekdays, dayOfMonth }),
     createdBy: String(doc.createdBy),
     isActive: doc.isActive,
     createdAt: doc.createdAt,
@@ -83,12 +95,16 @@ export async function createChecklist(input: CreateChecklistInput, user: AuthUse
     dueTime: t.dueTime,
   }));
 
+  const frequency = input.frequency ?? "daily";
   const [checklist] = await Checklist.create([
     {
       title: input.title.trim(),
       description: input.description?.trim(),
       assignedUserIds: input.assignedUserIds,
       tasks,
+      frequency,
+      weekdays: frequency === "weekly" ? input.weekdays : undefined,
+      dayOfMonth: frequency === "monthly" ? input.dayOfMonth : undefined,
       createdBy: user.id,
       isActive: true,
     },
@@ -138,6 +154,22 @@ export async function updateChecklist(
       dueTime: t.dueTime,
     })) as IChecklist["tasks"];
   }
+  if (input.frequency !== undefined) {
+    checklist.frequency = input.frequency;
+    if (input.frequency === "weekly") {
+      checklist.weekdays = input.weekdays;
+      checklist.dayOfMonth = undefined;
+    } else if (input.frequency === "monthly") {
+      checklist.dayOfMonth = input.dayOfMonth;
+      checklist.weekdays = undefined;
+    } else {
+      checklist.weekdays = undefined;
+      checklist.dayOfMonth = undefined;
+    }
+  } else {
+    if (input.weekdays !== undefined) checklist.weekdays = input.weekdays;
+    if (input.dayOfMonth !== undefined) checklist.dayOfMonth = input.dayOfMonth;
+  }
 
   await checklist.save();
 
@@ -162,7 +194,10 @@ export async function getTodayChecklists(user: AuthUser, date?: string) {
     assignedUserIds: new Types.ObjectId(user.id),
   };
 
-  const checklists = await Checklist.find(filter).sort({ title: 1 }).lean();
+  const allChecklists = await Checklist.find(filter).sort({ title: 1 }).lean();
+  const checklists = allChecklists.filter((c) =>
+    isChecklistScheduledOn(c as ChecklistScheduleFields, day)
+  );
   const checklistIds = checklists.map((c) => c._id);
 
   const completions = await ChecklistCompletion.find({

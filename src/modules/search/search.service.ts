@@ -3,7 +3,7 @@ import { Brand } from "../../models/Brand.js";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
 import { StockMovement } from "../../models/StockMovement.js";
-import { DispatchType } from "../../shared/constants/roles.js";
+import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
 import { Permission } from "../../shared/constants/permissions.js";
 import { BadRequestError, ForbiddenError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
@@ -170,11 +170,8 @@ export async function searchInvoiceSuggestions(
   }).distinct("_id");
 
   const movementFilter = {
-    $or: [
-      { dispatchType: DispatchType.DIRECT_SELLING },
-      { invoiceNumber: { $exists: true, $nin: [null, ""] } },
-      { clientName: { $exists: true, $nin: [null, ""] } },
-    ],
+    type: StockMovementType.STOCK_OUT,
+    dispatchType: DispatchType.DIRECT_SELLING,
     $and: [
       {
         $or: [

@@ -6,7 +6,11 @@ import {
   requireAdminOrPermission,
   requireAnyPermission,
 } from "../../shared/middleware/requirePermission.js";
-import { hasPermission, isAdmin } from "../../shared/utils/permissions.js";
+import {
+  hasPermission,
+  hasPermissionSomewhere,
+  isAdmin,
+} from "../../shared/utils/permissions.js";
 import { getStaffVisibleWarehouseIds } from "../../shared/utils/warehouseAccess.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
@@ -45,7 +49,15 @@ router.get(
       hasPermission(req.user!, Permission.WAREHOUSES_MANAGE);
     const includeInactive =
       canManage && req.query.includeInactive === "true";
-    const scopeIds = isAdmin(req.user!)
+    // Transfer senders need every active site as a destination, even without
+    // grants there. Warehouse managers / admins also see the full list.
+    const canListAllSites =
+      isAdmin(req.user!) ||
+      canManage ||
+      hasPermissionSomewhere(req.user!, Permission.WAREHOUSES_VIEW) ||
+      hasPermissionSomewhere(req.user!, Permission.STOCK_OUT) ||
+      hasPermissionSomewhere(req.user!, Permission.TRANSFERS_MANAGE);
+    const scopeIds = canListAllSites
       ? null
       : getStaffVisibleWarehouseIds(req.user!);
     const warehouses = await warehousesService.listWarehouses(

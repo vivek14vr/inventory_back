@@ -1,5 +1,6 @@
 import { Types } from "mongoose";
 import { Notification } from "../../models/Notification.js";
+import { User } from "../../models/User.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import {
@@ -7,8 +8,17 @@ import {
   resolveTaskNotifications,
   syncChecklistReminders,
 } from "./checklistReminders.js";
+import type { SendAdminReminderInput } from "./notifications.validation.js";
 
 export { resolveTaskNotifications, syncChecklistReminders };
+
+function todayDateString(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 export async function listNotifications(
   user: AuthUser,
@@ -31,7 +41,9 @@ export async function listNotifications(
   ]);
 
   return {
-    items: items.map((doc) => mapNotification(doc as Parameters<typeof mapNotification>[0])),
+    items: items.map((doc) =>
+      mapNotification(doc as Parameters<typeof mapNotification>[0])
+    ),
     pagination: {
       page,
       limit,
@@ -74,6 +86,37 @@ export async function markAllNotificationsRead(user: AuthUser) {
     { $set: { read: true, readAt: new Date() } }
   );
   return { updated: result.modifiedCount };
+}
+
+export async function sendAdminReminder(
+  actor: AuthUser,
+  input: SendAdminReminderInput
+) {
+  if (!Types.ObjectId.isValid(input.userId)) {
+    throw new BadRequestError("Invalid user ID");
+  }
+
+  const target = await User.findById(input.userId).lean();
+  if (!target || target.isActive === false) {
+    throw new NotFoundError("User not found");
+  }
+
+  const [doc] = await Notification.create([
+    {
+      userId: target._id,
+      type: "ADMIN_REMINDER",
+      title: input.title,
+      message: input.message,
+      checklistTitle: "Admin reminder",
+      taskTitle: actor.name || "Administrator",
+      date: todayDateString(),
+      reminderKey: `admin_${new Types.ObjectId().toString()}`,
+      read: false,
+      resolved: false,
+    },
+  ]);
+
+  return mapNotification(doc.toObject() as Parameters<typeof mapNotification>[0]);
 }
 
 export async function pollNotifications(user: AuthUser) {

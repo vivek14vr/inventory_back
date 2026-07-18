@@ -38,20 +38,27 @@ export async function adjustBalance(
     assertPositiveIntegerQuantity(delta, "Stock change");
   }
 
-  // Guarded, atomic decrement: only succeeds when enough stock exists. This
-  // prevents two concurrent stock-outs/transfers from both passing a separate
-  // read-then-write check and overselling (important on standalone MongoDB
-  // where multi-document transactions are unavailable).
+  // Guarded, atomic decrement: only succeeds when enough stock exists.
+  // Filter `quantity: { $gte: -delta }` is the hard floor at 0 — concurrent
+  // stock-outs cannot both pass a separate read then oversell (important on
+  // standalone MongoDB where multi-document transactions are unavailable).
   if (delta < 0) {
+    const need = -delta;
     const updated = await InventoryBalance.findOneAndUpdate(
-      { warehouseId, productId, quantity: { $gte: -delta } },
+      { warehouseId, productId, quantity: { $gte: need } },
       { $inc: { quantity: delta } },
       { new: true, ...(session ? { session } : {}) }
     );
     if (!updated) {
       const current = await getBalance(warehouseId, productId, session);
       throw new BadRequestError(
-        `Insufficient stock. Available: ${current}, requested: ${Math.abs(delta)}`
+        `Insufficient stock. Available: ${current}, requested: ${need}`
+      );
+    }
+    if (updated.quantity < 0) {
+      // Should be unreachable given the $gte filter; fail closed if it happens.
+      throw new BadRequestError(
+        `Stock balance cannot go below zero (got ${updated.quantity})`
       );
     }
     assertNonNegativeIntegerQuantity(updated.quantity, "Stock balance");

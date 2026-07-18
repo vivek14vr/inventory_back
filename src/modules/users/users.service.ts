@@ -288,6 +288,9 @@ export async function updateUser(
   if (input.isActive !== undefined) user.isActive = input.isActive;
 
   if (input.password) {
+    if (!isAdmin(updatedBy)) {
+      throw new ForbiddenError("Only admins can set or reset user passwords");
+    }
     validatePasswordStrength(input.password);
     user.passwordHash = await hashPassword(input.password);
   }

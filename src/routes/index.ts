@@ -16,6 +16,7 @@ import { checklistsRoutes } from "../modules/checklists/checklists.routes.js";
 import { notificationsRoutes } from "../modules/notifications/notifications.routes.js";
 import { permissionsRoutes } from "../modules/permissions/permissions.routes.js";
 import { searchRoutes } from "../modules/search/search.routes.js";
+import { settingsRoutes } from "../modules/settings/settings.routes.js";
 
 export function createApiRouter(): Router {
   const router = Router();
@@ -23,6 +24,7 @@ export function createApiRouter(): Router {
   router.use("/health", healthRoutes);
   router.use("/auth", authRoutes);
   router.use("/permissions", permissionsRoutes);
+  router.use("/settings", settingsRoutes);
   router.use("/users", usersRoutes);
   router.use("/warehouses", warehousesRoutes);
   router.use("/brands", brandsRoutes);

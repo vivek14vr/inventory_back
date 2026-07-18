@@ -2,9 +2,20 @@ import { Types } from "mongoose";
 import { Checklist } from "../../models/Checklist.js";
 import { ChecklistCompletion } from "../../models/ChecklistCompletion.js";
 import { Notification } from "../../models/Notification.js";
+import {
+  DEFAULT_BEFORE_OFFSETS_MIN,
+  DEFAULT_CHECKLIST_REMINDER_SETTINGS,
+  type ChecklistReminderSettings,
+} from "../../models/SystemSettings.js";
 import type { AuthUser } from "../../shared/types/auth.js";
+import { isChecklistScheduledOn } from "../../shared/utils/checklistSchedule.js";
+import { getChecklistReminderSettings } from "../settings/settings.service.js";
 
-const BEFORE_OFFSETS_MIN = [60, 30, 15, 10, 5, 1] as const;
+export type ReminderKeyOptions = {
+  pendingEnabled?: boolean;
+  beforeOffsetsMin?: number[];
+  afterIntervalMin?: number;
+};
 
 function isPastDueTime(dueTime?: string, at: Date = new Date()): boolean {
   if (!dueTime) return false;
@@ -95,51 +106,85 @@ function buildReminderMessage(
   };
 }
 
-function elapsedAfterBuckets(due: Date, now: Date): number[] {
+/** Current overdue bucket only — do not backfill earlier buckets. */
+function currentAfterBucket(
+  due: Date,
+  now: Date,
+  intervalMin: number
+): number | null {
+  const intervalMs = Math.max(1, intervalMin) * 60_000;
   const msPast = now.getTime() - due.getTime();
-  if (msPast < 10 * 60 * 1000) return [];
+  if (msPast < intervalMs) return null;
   const minutesPast = Math.floor(msPast / 60_000);
-  const buckets: number[] = [];
-  for (let m = 10; m <= minutesPast; m += 10) {
-    buckets.push(m);
-  }
-  return buckets;
+  const bucket = Math.floor(minutesPast / intervalMin) * intervalMin;
+  return bucket >= intervalMin ? bucket : null;
 }
 
-function reminderKeysForTask(
+/**
+ * Reminder keys for this sync tick.
+ * - Optional `pending` while the task is open.
+ * - At most one `before_*`: the tightest configured window for remaining time.
+ * - At most one `after_*` once overdue.
+ */
+export function reminderKeysForTask(
   dueTime: string | undefined,
-  now: Date
+  now: Date,
+  options: ReminderKeyOptions = {}
 ): string[] {
-  const keys: string[] = ["pending"];
+  const pendingEnabled = options.pendingEnabled !== false;
+  const beforeOffsets =
+    options.beforeOffsetsMin?.length
+      ? options.beforeOffsetsMin
+      : [...DEFAULT_BEFORE_OFFSETS_MIN];
+  const afterIntervalMin =
+    options.afterIntervalMin ??
+    DEFAULT_CHECKLIST_REMINDER_SETTINGS.afterIntervalMin;
+
+  const keys: string[] = [];
+  if (pendingEnabled) keys.push("pending");
 
   if (!dueTime) return keys;
 
   const due = dueDateTime(dueTime, now);
 
-  for (const offset of BEFORE_OFFSETS_MIN) {
-    const triggerAt = new Date(due.getTime() - offset * 60_000);
-    if (now >= triggerAt) {
-      keys.push(`before_${offset}`);
-    }
+  if (now > due) {
+    const bucket = currentAfterBucket(due, now, afterIntervalMin);
+    if (bucket != null) keys.push(`after_${bucket}`);
+    return keys;
   }
 
-  if (now > due) {
-    for (const bucket of elapsedAfterBuckets(due, now)) {
-      keys.push(`after_${bucket}`);
-    }
+  const remainingMs = due.getTime() - now.getTime();
+  const remainingMins = remainingMs / 60_000;
+
+  const ascending = [...beforeOffsets].sort((a, b) => a - b);
+  const currentBefore = ascending.find((offset) => remainingMins <= offset);
+
+  if (currentBefore != null) {
+    keys.push(`before_${currentBefore}`);
   }
 
   return keys;
 }
 
 export async function syncChecklistReminders(user: AuthUser, date?: string) {
+  const settings: ChecklistReminderSettings =
+    await getChecklistReminderSettings();
+
+  if (!settings.enabled) {
+    return { created: 0, notifications: [] as ReturnType<typeof mapNotification>[] };
+  }
+
   const day = date ?? todayDateString();
   const now = new Date();
 
-  const checklists = await Checklist.find({
+  const allChecklists = await Checklist.find({
     isActive: true,
     assignedUserIds: new Types.ObjectId(user.id),
   }).lean();
+
+  const checklists = allChecklists.filter((c) =>
+    isChecklistScheduledOn(c, day)
+  );
 
   if (checklists.length === 0) {
     return { created: 0, notifications: [] as ReturnType<typeof mapNotification>[] };
@@ -157,6 +202,11 @@ export async function syncChecklistReminders(user: AuthUser, date?: string) {
   );
 
   const createdNotifications: NonNullable<Awaited<ReturnType<typeof upsertReminder>>>[] = [];
+  const keyOptions: ReminderKeyOptions = {
+    pendingEnabled: settings.pendingEnabled,
+    beforeOffsetsMin: settings.beforeOffsetsMin,
+    afterIntervalMin: settings.afterIntervalMin,
+  };
 
   for (const checklist of checklists) {
     for (const task of checklist.tasks) {
@@ -165,7 +215,7 @@ export async function syncChecklistReminders(user: AuthUser, date?: string) {
         continue;
       }
 
-      const keys = reminderKeysForTask(task.dueTime, now);
+      const keys = reminderKeysForTask(task.dueTime, now, keyOptions);
       for (const reminderKey of keys) {
         const { title, message, type } = buildReminderMessage(
           task.title,
@@ -220,25 +270,37 @@ async function upsertReminder(input: {
 
   if (existing) return null;
 
-  const [doc] = await Notification.create([
-    {
-      userId: input.userId,
-      type: input.type,
-      title: input.title,
-      message: input.message,
-      checklistId: input.checklistId,
-      taskId: input.taskId,
-      checklistTitle: input.checklistTitle,
-      taskTitle: input.taskTitle,
-      date: input.date,
-      reminderKey: input.reminderKey,
-      dueTime: input.dueTime,
-      read: false,
-      resolved: false,
-    },
-  ]);
-
-  return doc;
+  try {
+    const [doc] = await Notification.create([
+      {
+        userId: input.userId,
+        type: input.type,
+        title: input.title,
+        message: input.message,
+        checklistId: input.checklistId,
+        taskId: input.taskId,
+        checklistTitle: input.checklistTitle,
+        taskTitle: input.taskTitle,
+        date: input.date,
+        reminderKey: input.reminderKey,
+        dueTime: input.dueTime,
+        read: false,
+        resolved: false,
+      },
+    ]);
+    return doc;
+  } catch (err: unknown) {
+    // Concurrent poll / unique index race
+    if (
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code?: number }).code === 11000
+    ) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 export async function resolveTaskNotifications(
@@ -271,10 +333,10 @@ export function mapNotification(doc: {
   type: string;
   title: string;
   message: string;
-  checklistId: Types.ObjectId | string;
-  taskId: Types.ObjectId | string;
-  checklistTitle: string;
-  taskTitle: string;
+  checklistId?: Types.ObjectId | string | null;
+  taskId?: Types.ObjectId | string | null;
+  checklistTitle?: string | null;
+  taskTitle?: string | null;
   date: string;
   reminderKey: string;
   dueTime?: string;
@@ -289,10 +351,10 @@ export function mapNotification(doc: {
     type: doc.type,
     title: doc.title,
     message: doc.message,
-    checklistId: String(doc.checklistId),
-    taskId: String(doc.taskId),
-    checklistTitle: doc.checklistTitle,
-    taskTitle: doc.taskTitle,
+    checklistId: doc.checklistId ? String(doc.checklistId) : "",
+    taskId: doc.taskId ? String(doc.taskId) : "",
+    checklistTitle: doc.checklistTitle ?? "",
+    taskTitle: doc.taskTitle ?? "",
     date: doc.date,
     reminderKey: doc.reminderKey,
     dueTime: doc.dueTime,
