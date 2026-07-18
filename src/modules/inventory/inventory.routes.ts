@@ -164,6 +164,17 @@ router.get(
   })
 );
 
+router.get(
+  "/movements/:movementId/updates",
+  requireAdminOrPermission(Permission.INVENTORY_VIEW),
+  asyncHandler(async (req, res) => {
+    const data = await inventoryAdminService.listMovementInvoiceUpdates(
+      String(req.params.movementId)
+    );
+    sendSuccess(res, data);
+  })
+);
+
 router.patch(
   "/movements/:movementId/invoice",
   requireAdminOrPermission(Permission.INVENTORY_ADJUST),

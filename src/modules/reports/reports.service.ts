@@ -3,6 +3,7 @@ import { StockMovement } from "../../models/StockMovement.js";
 import { Transfer } from "../../models/Transfer.js";
 import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
 import * as inventoryAdmin from "../inventory/inventory.service.js";
+import { INVOICE_QTY_CORRECTION_NOTE_PREFIX } from "../stock/saleReturn.utils.js";
 import type {
   MovementReportQuery,
   ReportFilter,
@@ -130,6 +131,82 @@ export async function reportStockMovements(query: MovementReportQuery) {
         baseUnit: product.baseUnit ?? "piece",
         dispatchType: m.dispatchType ?? "",
         destination: dest?.code ?? "",
+        clientName: m.clientName ?? "",
+        invoiceNumber: m.invoiceNumber ?? "",
+        notes: m.notes ?? "",
+      };
+    }),
+  };
+}
+
+export async function reportClientReturns(query: ReportFilter) {
+  const filter: Record<string, unknown> = {
+    type: StockMovementType.STOCK_IN,
+    $and: [
+      {
+        $or: [
+          { relatedSaleMovementId: { $exists: true, $ne: null } },
+          { notes: { $regex: "client return", $options: "i" } },
+        ],
+      },
+      {
+        notes: {
+          $not: {
+            $regex: `^${INVOICE_QTY_CORRECTION_NOTE_PREFIX}`,
+            $options: "i",
+          },
+        },
+      },
+    ],
+  };
+
+  if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
+    filter.warehouseId = query.warehouseId;
+  }
+  if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
+    filter.brandId = query.brandId;
+  }
+  if (query.productId && Types.ObjectId.isValid(query.productId)) {
+    filter.productId = query.productId;
+  }
+  if (query.clientName?.trim()) {
+    filter.clientName = { $regex: query.clientName.trim(), $options: "i" };
+  }
+  if (query.invoiceNumber?.trim()) {
+    filter.invoiceNumber = { $regex: query.invoiceNumber.trim(), $options: "i" };
+  }
+  const createdAt = buildDateFilter(query.dateFrom, query.dateTo);
+  if (createdAt) filter.createdAt = createdAt;
+
+  const movements = await StockMovement.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(query.limit ?? 1000)
+    .populate("productId", "name stockUnit unitsPerStockUnit baseUnit")
+    .populate("brandId", "name")
+    .populate("warehouseId", "name code")
+    .lean();
+
+  return {
+    type: "RETURNS",
+    rows: movements.map((m) => {
+      const product = m.productId as unknown as {
+        name: string;
+        stockUnit?: string;
+        unitsPerStockUnit?: number;
+        baseUnit?: string;
+      };
+      const brand = m.brandId as unknown as { name: string };
+      const warehouse = m.warehouseId as unknown as { name: string; code: string };
+
+      return {
+        date: m.createdAt,
+        warehouse: warehouse.code,
+        product: product.name,
+        brand: brand.name,
+        quantity: m.quantity,
+        stockUnit: product.stockUnit ?? "unit",
+        unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
+        baseUnit: product.baseUnit ?? "piece",
         clientName: m.clientName ?? "",
         invoiceNumber: m.invoiceNumber ?? "",
         notes: m.notes ?? "",
@@ -397,6 +474,13 @@ export async function reportSalesByBrand(query: ReportFilter) {
           stockUnit: string;
           unitsPerStockUnit: number;
           baseUnit: string;
+          sales: Array<{
+            date: Date;
+            clientName: string;
+            invoiceNumber: string;
+            warehouse: string;
+            quantity: number;
+          }>;
         }
       >;
     }
@@ -424,11 +508,19 @@ export async function reportSalesByBrand(query: ReportFilter) {
         stockUnit: line.stockUnit,
         unitsPerStockUnit: line.unitsPerStockUnit,
         baseUnit: line.baseUnit,
+        sales: [],
       };
       g.products.set(line.product, product);
     }
     product.quantity += m.quantity;
     product.saleCount += 1;
+    product.sales.push({
+      date: m.createdAt,
+      clientName: m.clientName ?? "",
+      invoiceNumber: m.invoiceNumber ?? "",
+      warehouse: line.warehouse,
+      quantity: m.quantity,
+    });
     grouped.set(brand, g);
   }
 
@@ -438,9 +530,14 @@ export async function reportSalesByBrand(query: ReportFilter) {
         brand: g.brand,
         totalQuantity: g.totalQuantity,
         saleCount: g.saleCount,
-        products: Array.from(g.products.values()).sort((a, b) =>
-          a.product.localeCompare(b.product)
-        ),
+        products: Array.from(g.products.values())
+          .map((product) => ({
+            ...product,
+            sales: [...product.sales].sort(
+              (a, b) => b.date.getTime() - a.date.getTime()
+            ),
+          }))
+          .sort((a, b) => a.product.localeCompare(b.product)),
       }))
       .sort((a, b) => a.brand.localeCompare(b.brand)),
   };
@@ -511,6 +608,19 @@ export function exportReportCsv(
         { key: "destination", header: "Destination" },
         { key: "clientName", header: "Client" },
         { key: "invoiceNumber", header: "Invoice" },
+      ],
+    },
+    returns: {
+      filename: "returns-report",
+      columns: [
+        { key: "date", header: "Date" },
+        { key: "warehouse", header: "Warehouse" },
+        { key: "product", header: "Product" },
+        { key: "brand", header: "Brand" },
+        { key: "quantity", header: "Quantity" },
+        { key: "clientName", header: "Client" },
+        { key: "invoiceNumber", header: "Invoice" },
+        { key: "notes", header: "Notes" },
       ],
     },
     transfers: {

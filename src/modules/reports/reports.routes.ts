@@ -88,6 +88,21 @@ router.get(
 );
 
 router.get(
+  "/returns",
+  asyncHandler(async (req, res) => {
+    const parsed = reportFilterSchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
+    }
+    const data = await reportsService.reportClientReturns(parsed.data);
+    if (req.query.format === "csv") {
+      return handleExport("returns", data, res);
+    }
+    sendSuccess(res, data);
+  })
+);
+
+router.get(
   "/transfers",
   asyncHandler(async (req, res) => {
     const parsed = transferReportSchema.safeParse(req.query);

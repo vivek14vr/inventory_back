@@ -13,6 +13,7 @@ import type { AuthUser } from "../../shared/types/auth.js";
 import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction.js";
 import * as balanceService from "../stock/inventory.service.js";
 import {
+  INVOICE_QTY_CORRECTION_NOTE_PREFIX,
   saleQuantityInventoryDelta,
   sumReturnedQuantityForSale,
 } from "../stock/saleReturn.utils.js";
@@ -448,6 +449,7 @@ type MovementDoc = {
   invoiceNumber?: string;
   notes?: string;
   transferId?: Types.ObjectId;
+  relatedSaleMovementId?: Types.ObjectId;
   invoiceModificationCount?: number;
   createdAt: Date;
   productId?: unknown;
@@ -485,6 +487,9 @@ function mapMovementRow(m: MovementDoc) {
     clientName: m.clientName,
     invoiceNumber: m.invoiceNumber,
     notes: m.notes,
+    relatedSaleMovementId: m.relatedSaleMovementId
+      ? String(m.relatedSaleMovementId)
+      : undefined,
     invoiceModificationCount: m.invoiceModificationCount ?? 0,
     transferId: m.transferId ? String(m.transferId) : undefined,
     product: {
@@ -517,16 +522,26 @@ function describeMovement(m: {
   clientName?: string;
   invoiceNumber?: string;
   notes?: string;
+  relatedSaleMovementId?: string;
   destinationWarehouse?: { code: string; name: string };
 }): string {
+  const notes = m.notes?.trim() ?? "";
+  if (notes.toLowerCase().startsWith(INVOICE_QTY_CORRECTION_NOTE_PREFIX.toLowerCase())) {
+    return notes;
+  }
   if (m.type === StockMovementType.STOCK_IN) {
-    if (m.notes?.toLowerCase().includes("transfer")) {
+    if (m.relatedSaleMovementId || notes.toLowerCase().includes("client return")) {
+      const client = m.clientName?.trim() || "Client";
+      const inv = m.invoiceNumber?.trim();
+      return inv ? `Return from ${client} · Invoice ${inv}` : `Return from ${client}`;
+    }
+    if (notes.toLowerCase().includes("transfer")) {
       return "Transfer received";
     }
-    if (m.notes?.toLowerCase().includes("adjustment")) {
+    if (notes.toLowerCase().includes("adjustment")) {
       return "Admin adjustment (increase)";
     }
-    return m.notes?.trim() || "Stock in";
+    return notes || "Stock in";
   }
 
   if (m.dispatchType === DispatchType.TRANSFER && m.destinationWarehouse) {
@@ -537,13 +552,13 @@ function describeMovement(m: {
     const inv = m.invoiceNumber?.trim();
     return inv ? `Sale to ${client} · Invoice ${inv}` : `Sale to ${client}`;
   }
-  if (m.notes?.toLowerCase().includes("adjustment")) {
+  if (notes.toLowerCase().includes("adjustment")) {
     return "Admin adjustment (decrease)";
   }
-  if (m.notes?.toLowerCase().includes("tally")) {
+  if (notes.toLowerCase().includes("tally")) {
     return "Tally import deduction";
   }
-  return m.notes?.trim() || "Stock out";
+  return notes || "Stock out";
 }
 
 function applyRunningBalances(
@@ -582,6 +597,9 @@ function applyRunningBalances(
         clientName: m.clientName,
         invoiceNumber: m.invoiceNumber,
         notes: m.notes,
+        relatedSaleMovementId: m.relatedSaleMovementId
+          ? String(m.relatedSaleMovementId)
+          : undefined,
         destinationWarehouse: row.destinationWarehouse,
       }),
     };
@@ -774,7 +792,53 @@ export async function listMovementHistory(query: MovementsQuery) {
       .lean(),
   ]);
 
-  const items = (movements as MovementDoc[]).map((m) => mapMovementRow(m));
+  const balanceKeys = new Map<string, { warehouseId: Types.ObjectId; productId: Types.ObjectId }>();
+  for (const m of movements as MovementDoc[]) {
+    const warehouse = m.warehouseId as { _id: Types.ObjectId } | Types.ObjectId | undefined;
+    const product = m.productId as { _id: Types.ObjectId } | Types.ObjectId | undefined;
+    const warehouseId =
+      warehouse && typeof warehouse === "object" && "_id" in warehouse
+        ? warehouse._id
+        : (warehouse as Types.ObjectId | undefined);
+    const productId =
+      product && typeof product === "object" && "_id" in product
+        ? product._id
+        : (product as Types.ObjectId | undefined);
+    if (!warehouseId || !productId) continue;
+    balanceKeys.set(`${String(warehouseId)}:${String(productId)}`, {
+      warehouseId,
+      productId,
+    });
+  }
+
+  const balancePairs = Array.from(balanceKeys.values());
+  const balances =
+    balancePairs.length === 0
+      ? []
+      : await InventoryBalance.find({
+          $or: balancePairs.map((pair) => ({
+            warehouseId: pair.warehouseId,
+            productId: pair.productId,
+          })),
+        })
+          .select("warehouseId productId quantity")
+          .lean();
+
+  const balanceByKey = new Map(
+    balances.map((row) => [
+      `${String(row.warehouseId)}:${String(row.productId)}`,
+      row.quantity,
+    ])
+  );
+
+  const items = (movements as MovementDoc[]).map((m) => {
+    const row = mapMovementRow(m);
+    const remainingStock =
+      row.warehouse?.id && row.product?.id
+        ? (balanceByKey.get(`${row.warehouse.id}:${row.product.id}`) ?? 0)
+        : 0;
+    return { ...row, remainingStock };
+  });
 
   return {
     items,
@@ -1461,10 +1525,22 @@ async function resolveInvoiceMovementFilter(
   query: Pick<InvoiceListQuery, "search" | "warehouseId" | "clientId">
 ) {
   const filter: Record<string, unknown> = {
-    $or: [
-      { dispatchType: DispatchType.DIRECT_SELLING },
-      { invoiceNumber: { $exists: true, $nin: [null, ""] } },
-      { clientName: { $exists: true, $nin: [null, ""] } },
+    $and: [
+      {
+        $or: [
+          { dispatchType: DispatchType.DIRECT_SELLING },
+          { invoiceNumber: { $exists: true, $nin: [null, ""] } },
+          { clientName: { $exists: true, $nin: [null, ""] } },
+        ],
+      },
+      {
+        notes: {
+          $not: {
+            $regex: `^${INVOICE_QTY_CORRECTION_NOTE_PREFIX}`,
+            $options: "i",
+          },
+        },
+      },
     ],
   };
 
@@ -1501,8 +1577,7 @@ async function resolveInvoiceMovementFilter(
     if (productIds.length > 0) {
       searchClauses.push({ productId: { $in: productIds } });
     }
-    filter.$and = [{ $or: filter.$or }, { $or: searchClauses }];
-    delete filter.$or;
+    (filter.$and as Record<string, unknown>[]).push({ $or: searchClauses });
   }
 
   return filter;
@@ -1525,6 +1600,9 @@ async function fetchInvoiceMovementRows(
 }
 
 function voucherTypeLabel(row: ReturnType<typeof mapMovementRow>): string {
+  if (row.notes?.toLowerCase().startsWith(INVOICE_QTY_CORRECTION_NOTE_PREFIX.toLowerCase())) {
+    return "Invoice edit";
+  }
   if (row.type === "STOCK_IN") return "Return";
   if (row.dispatchType === "DIRECT_SELLING") return "Sales";
   if (row.dispatchType === "TRANSFER") return "Transfer";
@@ -1795,6 +1873,27 @@ export async function updateMovementInvoice(
           delta,
           session
         );
+
+        const clientLabel = lineMovement.clientName?.trim() || "Client";
+        const invoiceLabel = lineMovement.invoiceNumber?.trim() || "—";
+        await StockMovement.create(
+          [
+            {
+              type:
+                delta > 0 ? StockMovementType.STOCK_IN : StockMovementType.STOCK_OUT,
+              warehouseId: lineMovement.warehouseId,
+              productId: lineMovement.productId,
+              brandId: lineMovement.brandId,
+              quantity: Math.abs(delta),
+              clientName: lineMovement.clientName,
+              invoiceNumber: lineMovement.invoiceNumber,
+              relatedSaleMovementId: lineMovement._id,
+              notes: `${INVOICE_QTY_CORRECTION_NOTE_PREFIX} · ${clientLabel} · ${invoiceLabel} · sold ${previousQuantity} → ${nextQuantity}`,
+              createdBy: user.id,
+            },
+          ],
+          dbSession(session)
+        );
       }
 
       lineMovement.quantity = nextQuantity;
@@ -1835,6 +1934,7 @@ export async function updateMovementInvoice(
               clientName: lineMovement.clientName ?? undefined,
               previousQuantity,
               quantity: nextQuantity,
+              inventoryDelta: delta,
             },
           },
         ],
@@ -2033,4 +2133,117 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
 
     return { deleted: true, id: movementId };
   });
+}
+
+export type MovementInvoiceUpdateEntry = {
+  id: string;
+  createdAt: Date;
+  user?: { id: string; name: string; email: string };
+  previousQuantity?: number;
+  quantity?: number;
+  inventoryDelta?: number;
+  previousInvoiceNumber?: string;
+  invoiceNumber?: string;
+  previousClientName?: string;
+  clientName?: string;
+  productName?: string;
+  warehouseName?: string;
+  warehouseCode?: string;
+  updatedLineCount?: number;
+  summary: string;
+};
+
+function metaNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function metaText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function summarizeInvoiceUpdate(meta: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const prevQty = metaNumber(meta.previousQuantity);
+  const nextQty = metaNumber(meta.quantity);
+  if (prevQty !== undefined && nextQty !== undefined && prevQty !== nextQty) {
+    parts.push(`Quantity ${prevQty.toLocaleString("en-IN")} → ${nextQty.toLocaleString("en-IN")}`);
+  }
+
+  const prevInvoice = metaText(meta.previousInvoiceNumber);
+  const nextInvoice = metaText(meta.invoiceNumber);
+  if (prevInvoice !== undefined || nextInvoice !== undefined) {
+    if ((prevInvoice ?? "") !== (nextInvoice ?? "")) {
+      parts.push(`Invoice ${prevInvoice || "—"} → ${nextInvoice || "—"}`);
+    }
+  }
+
+  const prevClient = metaText(meta.previousClientName);
+  const nextClient = metaText(meta.clientName);
+  if (prevClient !== undefined || nextClient !== undefined) {
+    if ((prevClient ?? "") !== (nextClient ?? "")) {
+      parts.push(`Client ${prevClient || "—"} → ${nextClient || "—"}`);
+    }
+  }
+
+  const updatedLineCount = metaNumber(meta.updatedLineCount);
+  if (updatedLineCount !== undefined && updatedLineCount > 1 && parts.length === 0) {
+    parts.push(`Updated ${updatedLineCount} invoice lines`);
+  }
+
+  return parts.length > 0 ? parts.join(" · ") : "Invoice details updated";
+}
+
+export async function listMovementInvoiceUpdates(movementId: string) {
+  if (!Types.ObjectId.isValid(movementId)) {
+    throw new BadRequestError("Invalid movement id");
+  }
+
+  const movementOid = new Types.ObjectId(movementId);
+  const movement = await StockMovement.findById(movementOid).lean();
+  if (!movement) {
+    throw new NotFoundError("Stock movement not found");
+  }
+
+  const logs = await AuditLog.find({
+    action: "INVOICE_UPDATED",
+    entity: "StockMovement",
+    $or: [{ entityId: movementOid }, { "metadata.movementId": movementId }],
+  })
+    .sort({ createdAt: -1 })
+    .populate("userId", "name email")
+    .lean();
+
+  const items: MovementInvoiceUpdateEntry[] = logs.map((log) => {
+    const meta = (log.metadata ?? {}) as Record<string, unknown>;
+    const user = log.userId as
+      | { _id: Types.ObjectId; name: string; email: string }
+      | null
+      | undefined;
+
+    return {
+      id: String(log._id),
+      createdAt: log.createdAt,
+      user: user
+        ? { id: String(user._id), name: user.name, email: user.email }
+        : undefined,
+      previousQuantity: metaNumber(meta.previousQuantity),
+      quantity: metaNumber(meta.quantity),
+      inventoryDelta: metaNumber(meta.inventoryDelta),
+      previousInvoiceNumber: metaText(meta.previousInvoiceNumber),
+      invoiceNumber: metaText(meta.invoiceNumber),
+      previousClientName: metaText(meta.previousClientName),
+      clientName: metaText(meta.clientName),
+      productName: metaText(meta.productName),
+      warehouseName: metaText(meta.warehouseName),
+      warehouseCode: metaText(meta.warehouseCode),
+      updatedLineCount: metaNumber(meta.updatedLineCount),
+      summary: summarizeInvoiceUpdate(meta),
+    };
+  });
+
+  return {
+    movementId,
+    modificationCount: movement.invoiceModificationCount ?? 0,
+    items,
+  };
 }

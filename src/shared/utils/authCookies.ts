@@ -16,7 +16,9 @@ function cookieBaseOptions() {
 }
 
 export function setAccessTokenCookie(res: Response, accessToken: string): void {
-  const maxAge = parseDurationToSeconds(env.JWT_ACCESS_EXPIRES_IN) * 1000;
+  // Cookie must outlive the JWT so Next.js middleware can still see an expired
+  // access token and let the client refresh instead of forcing logout.
+  const maxAge = parseDurationToSeconds(env.JWT_REFRESH_EXPIRES_IN) * 1000;
   res.cookie(ACCESS_TOKEN_COOKIE, accessToken, {
     ...cookieBaseOptions(),
     httpOnly: false,

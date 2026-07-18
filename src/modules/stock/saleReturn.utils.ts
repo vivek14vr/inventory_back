@@ -6,6 +6,13 @@ import {
 } from "../../shared/constants/roles.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 
+/** Ledger rows for sold-qty edits; must not count toward returned quantity. */
+export const INVOICE_QTY_CORRECTION_NOTE_PREFIX = "Invoice quantity correction";
+
+const notInvoiceQtyCorrection = {
+  notes: { $not: { $regex: `^${INVOICE_QTY_CORRECTION_NOTE_PREFIX}`, $options: "i" } },
+};
+
 type SaleMovementRef = {
   _id: Types.ObjectId;
   invoiceNumber?: string;
@@ -41,6 +48,7 @@ function unlinkedReturnFilter(
     clientName: exactCaseInsensitiveRegex(clientName),
     productId,
     warehouseId,
+    ...notInvoiceQtyCorrection,
   };
 }
 
@@ -81,6 +89,7 @@ export async function sumReturnedQuantityForSale(
       $match: {
         type: StockMovementType.STOCK_IN,
         relatedSaleMovementId: sale._id,
+        ...notInvoiceQtyCorrection,
       },
     },
     { $group: { _id: null, total: { $sum: "$quantity" } } },
