@@ -11,25 +11,56 @@ import {
   assertPositiveIntegerQuantity,
 } from "../../shared/validation/quantity.js";
 
+/** Accept ObjectId, hex string, or populated `{ _id }` — never `String(doc)` → "[object Object]". */
+function asIdString(
+  value: Types.ObjectId | { _id: Types.ObjectId } | string | null | undefined,
+  label: string
+): string {
+  if (value == null || value === "") {
+    throw new BadRequestError(`Invalid ${label}`);
+  }
+  if (typeof value === "object" && "_id" in value && value._id != null) {
+    const id = String(value._id);
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestError(`Invalid ${label}`);
+    }
+    return id;
+  }
+  if (value instanceof Types.ObjectId) {
+    return String(value);
+  }
+  const id = String(value);
+  if (!Types.ObjectId.isValid(id) || id === "[object Object]") {
+    throw new BadRequestError(`Invalid ${label}`);
+  }
+  return id;
+}
+
 export async function getBalance(
-  warehouseId: string,
-  productId: string,
+  warehouseId: string | Types.ObjectId | { _id: Types.ObjectId },
+  productId: string | Types.ObjectId | { _id: Types.ObjectId },
   session?: mongoose.ClientSession | null
 ): Promise<number> {
-  const balance = await InventoryBalance.findOne({ warehouseId, productId }).session(
-    session ?? null
-  );
+  const warehouse = asIdString(warehouseId, "warehouse");
+  const product = asIdString(productId, "product");
+  const balance = await InventoryBalance.findOne({
+    warehouseId: warehouse,
+    productId: product,
+  }).session(session ?? null);
   return balance?.quantity ?? 0;
 }
 
 export async function adjustBalance(
-  warehouseId: string,
-  productId: string,
+  warehouseId: string | Types.ObjectId | { _id: Types.ObjectId },
+  productId: string | Types.ObjectId | { _id: Types.ObjectId },
   delta: number,
   session?: mongoose.ClientSession | null
 ): Promise<number> {
+  const warehouse = asIdString(warehouseId, "warehouse");
+  const product = asIdString(productId, "product");
+
   if (delta === 0) {
-    return getBalance(warehouseId, productId, session);
+    return getBalance(warehouse, product, session);
   }
 
   if (delta < 0) {
@@ -45,12 +76,12 @@ export async function adjustBalance(
   if (delta < 0) {
     const need = -delta;
     const updated = await InventoryBalance.findOneAndUpdate(
-      { warehouseId, productId, quantity: { $gte: need } },
+      { warehouseId: warehouse, productId: product, quantity: { $gte: need } },
       { $inc: { quantity: delta } },
       { new: true, ...(session ? { session } : {}) }
     );
     if (!updated) {
-      const current = await getBalance(warehouseId, productId, session);
+      const current = await getBalance(warehouse, product, session);
       throw new BadRequestError(
         `Insufficient stock. Available: ${current}, requested: ${need}`
       );
@@ -67,7 +98,7 @@ export async function adjustBalance(
 
   // Atomic increment; creates the balance row if it does not exist yet.
   const updated = await InventoryBalance.findOneAndUpdate(
-    { warehouseId, productId },
+    { warehouseId: warehouse, productId: product },
     { $inc: { quantity: delta } },
     { new: true, upsert: true, ...(session ? { session } : {}) }
   );
@@ -81,23 +112,25 @@ export async function adjustBalance(
  * stock-out/$inc changed the row, fails with Conflict so the caller can refresh.
  */
 export async function setBalance(
-  warehouseId: string,
-  productId: string,
+  warehouseId: string | Types.ObjectId | { _id: Types.ObjectId },
+  productId: string | Types.ObjectId | { _id: Types.ObjectId },
   quantity: number,
   session?: mongoose.ClientSession | null,
   expectedPrevious?: number
 ): Promise<{ previous: number; next: number; delta: number }> {
   assertNonNegativeIntegerQuantity(quantity, "Quantity");
+  const warehouse = asIdString(warehouseId, "warehouse");
+  const product = asIdString(productId, "product");
 
   const previous =
-    expectedPrevious ?? (await getBalance(warehouseId, productId, session));
+    expectedPrevious ?? (await getBalance(warehouse, product, session));
 
   if (previous === quantity) {
     return { previous, next: quantity, delta: 0 };
   }
 
   const updated = await InventoryBalance.findOneAndUpdate(
-    { warehouseId, productId, quantity: previous },
+    { warehouseId: warehouse, productId: product, quantity: previous },
     { $set: { quantity } },
     { new: true, ...(session ? { session } : {}) }
   );
@@ -110,7 +143,7 @@ export async function setBalance(
   if (previous === 0) {
     try {
       await InventoryBalance.create(
-        [{ warehouseId, productId, quantity }],
+        [{ warehouseId: warehouse, productId: product, quantity }],
         session ? { session } : undefined
       );
       return { previous: 0, next: quantity, delta: quantity };
@@ -125,8 +158,8 @@ export async function setBalance(
 }
 
 export async function assertSufficientStock(
-  warehouseId: string,
-  productId: string,
+  warehouseId: string | Types.ObjectId | { _id: Types.ObjectId },
+  productId: string | Types.ObjectId | { _id: Types.ObjectId },
   quantity: number,
   session?: mongoose.ClientSession | null
 ): Promise<void> {

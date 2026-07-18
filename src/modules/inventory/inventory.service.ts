@@ -1932,16 +1932,16 @@ export async function updateMovementInvoice(
       );
       if (delta < 0) {
         await balanceService.assertSufficientStock(
-          String(lineMovement.warehouseId),
-          String(lineMovement.productId),
+          extractObjectId(lineMovement.warehouseId) ?? "",
+          extractObjectId(lineMovement.productId) ?? "",
           Math.abs(delta),
           session
         );
       }
       if (delta !== 0) {
         await balanceService.adjustBalance(
-          String(lineMovement.warehouseId),
-          String(lineMovement.productId),
+          extractObjectId(lineMovement.warehouseId) ?? "",
+          extractObjectId(lineMovement.productId) ?? "",
           delta,
           session
         );
@@ -2153,8 +2153,8 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
     const restoreQuantity = movement.quantity - returnedQuantity;
     if (restoreQuantity > 0) {
       await balanceService.adjustBalance(
-        String(movement.warehouseId),
-        String(movement.productId),
+        extractObjectId(movement.warehouseId) ?? "",
+        extractObjectId(movement.productId) ?? "",
         restoreQuantity,
         session
       );
