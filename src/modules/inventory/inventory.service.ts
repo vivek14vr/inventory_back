@@ -473,6 +473,19 @@ type MovementDoc = {
   createdBy?: unknown;
 };
 
+/** Normalize populated docs or raw ObjectIds to a hex id string. */
+function extractObjectId(value: unknown): string | null {
+  if (value == null) return null;
+  if (value instanceof Types.ObjectId) return String(value);
+  if (typeof value === "string" && Types.ObjectId.isValid(value)) return value;
+  if (typeof value === "object" && value !== null && "_id" in value) {
+    const id = (value as { _id: unknown })._id;
+    if (id instanceof Types.ObjectId) return String(id);
+    if (typeof id === "string" && Types.ObjectId.isValid(id)) return id;
+  }
+  return null;
+}
+
 function mapMovementRow(m: MovementDoc) {
   const product = m.productId as {
     _id: Types.ObjectId;
@@ -808,20 +821,12 @@ export async function listMovementHistory(query: MovementsQuery) {
 
   const balanceKeys = new Map<string, { warehouseId: Types.ObjectId; productId: Types.ObjectId }>();
   for (const m of movements as MovementDoc[]) {
-    const warehouse = m.warehouseId as { _id: Types.ObjectId } | Types.ObjectId | undefined;
-    const product = m.productId as { _id: Types.ObjectId } | Types.ObjectId | undefined;
-    const warehouseId =
-      warehouse && typeof warehouse === "object" && "_id" in warehouse
-        ? warehouse._id
-        : (warehouse as Types.ObjectId | undefined);
-    const productId =
-      product && typeof product === "object" && "_id" in product
-        ? product._id
-        : (product as Types.ObjectId | undefined);
+    const warehouseId = extractObjectId(m.warehouseId);
+    const productId = extractObjectId(m.productId);
     if (!warehouseId || !productId) continue;
-    balanceKeys.set(`${String(warehouseId)}:${String(productId)}`, {
-      warehouseId,
-      productId,
+    balanceKeys.set(`${warehouseId}:${productId}`, {
+      warehouseId: new Types.ObjectId(warehouseId),
+      productId: new Types.ObjectId(productId),
     });
   }
 
@@ -841,16 +846,20 @@ export async function listMovementHistory(query: MovementsQuery) {
   const balanceByKey = new Map(
     balances.map((row) => [
       `${String(row.warehouseId)}:${String(row.productId)}`,
-      row.quantity,
+      typeof row.quantity === "number" && Number.isFinite(row.quantity)
+        ? row.quantity
+        : 0,
     ])
   );
 
   const items = (movements as MovementDoc[]).map((m) => {
     const row = mapMovementRow(m);
-    const remainingStock =
+    const key =
       row.warehouse?.id && row.product?.id
-        ? (balanceByKey.get(`${row.warehouse.id}:${row.product.id}`) ?? 0)
-        : 0;
+        ? `${row.warehouse.id}:${row.product.id}`
+        : null;
+    // Always send a number so the UI never treats remaining stock as "missing".
+    const remainingStock = key ? (balanceByKey.get(key) ?? 0) : 0;
     return { ...row, remainingStock };
   });
 
