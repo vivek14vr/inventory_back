@@ -2,9 +2,10 @@ import { Types } from "mongoose";
 import type { PermissionCode } from "../constants/permissions.js";
 import { Permission } from "../constants/permissions.js";
 import type { AuthUser } from "../types/auth.js";
-import { BadRequestError } from "../errors/AppError.js";
+import { BadRequestError, ForbiddenError } from "../errors/AppError.js";
 import {
   getWarehouseIdsForPermission,
+  hasPermissionSomewhere,
   isAdmin,
   resolveWarehouseIdForPermission,
 } from "./permissions.js";
@@ -50,4 +51,34 @@ export function getStaffVisibleWarehouseIds(user: AuthUser): string[] {
     if (grant.warehouseId) ids.add(grant.warehouseId);
   }
   return Array.from(ids);
+}
+
+/**
+ * Scope Check Stock / inventory browse queries.
+ * Company-wide (INVENTORY_VIEW / admin): optional single warehouse filter.
+ * Warehouse staff (STOCK_VIEW): always limited to granted warehouses.
+ */
+export function resolveCheckStockWarehouseScope(
+  user: AuthUser,
+  requestedWarehouseId?: string
+): { warehouseId?: string; warehouseIds?: string[] } {
+  const requested = requestedWarehouseId?.trim() || undefined;
+
+  if (isAdmin(user) || hasPermissionSomewhere(user, Permission.INVENTORY_VIEW)) {
+    return requested ? { warehouseId: requested } : {};
+  }
+
+  const allowed = getWarehouseIdsForPermission(user, Permission.STOCK_VIEW);
+  if (allowed.length === 0) {
+    throw new ForbiddenError("You do not have permission to view stock");
+  }
+
+  if (requested) {
+    if (!allowed.includes(requested)) {
+      throw new ForbiddenError("You do not have access to this warehouse");
+    }
+    return { warehouseId: requested };
+  }
+
+  return { warehouseIds: allowed };
 }

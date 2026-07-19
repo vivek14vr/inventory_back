@@ -202,7 +202,7 @@ export async function processTallyImport(
           session
         );
 
-        await inventoryService.adjustBalance(
+        const balanceAfter = await inventoryService.adjustBalance(
           warehouseId,
           String(product._id),
           -row.quantity,
@@ -217,6 +217,7 @@ export async function processTallyImport(
               productId: product._id,
               brandId: brand._id,
               quantity: row.quantity,
+              balanceAfter,
               notes: `Tally import: ${fileName}`,
               createdBy: user.id,
             },

@@ -278,6 +278,7 @@ export async function stockIn(input: StockInInput, user: AuthUser) {
           productId,
           brandId,
           quantity: input.quantity,
+          balanceAfter: newQty,
           clientName: input.clientName?.trim() || undefined,
           invoiceNumber: input.invoiceNumber?.trim() || undefined,
           notes: input.notes,
@@ -399,6 +400,7 @@ async function receiveTransfer(
         productId: transfer.productId,
         brandId: transfer.brandId,
         quantity: transfer.quantity,
+        balanceAfter: newQty,
         transferId: transfer._id,
         notes: input.notes ?? "Received from inter-warehouse transfer",
         createdBy: user.id,
@@ -570,6 +572,11 @@ export async function stockOut(input: StockOutInput, user: AuthUser) {
             productId,
             brandId,
             quantity: input.quantity,
+            invoiceSoldQuantity:
+              input.dispatchType === DispatchType.DIRECT_SELLING
+                ? input.quantity
+                : undefined,
+            balanceAfter: newQty,
             dispatchType: input.dispatchType,
             clientName:
               input.dispatchType === DispatchType.DIRECT_SELLING
@@ -948,6 +955,8 @@ export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
               productId: line.productId,
               brandId: line.brandId,
               quantity: line.quantity,
+              invoiceSoldQuantity: line.quantity,
+              balanceAfter: newQty,
               dispatchType: DispatchType.DIRECT_SELLING,
               clientName,
               invoiceNumber,

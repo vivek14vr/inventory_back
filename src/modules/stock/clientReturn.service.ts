@@ -23,8 +23,10 @@ import { resolveWarehouseIdForAnyPermission } from "../../shared/utils/permissio
 import { paginateArray } from "../../shared/pagination/pagination.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import {
+  effectiveInvoiceSoldQuantity,
   notInvoiceQtyCorrection,
   saleQuantityInventoryDelta,
+  sumInvoiceQtyCorrectionSoldAdjust,
   sumReturnedQuantityForSale,
 } from "./saleReturn.utils.js";
 import * as balanceService from "./inventory.service.js";
@@ -38,6 +40,7 @@ import type {
 type SaleMovementDoc = {
   _id: Types.ObjectId;
   quantity: number;
+  invoiceSoldQuantity?: number;
   invoiceNumber?: string;
   clientName?: string;
   warehouseId: Types.ObjectId;
@@ -200,6 +203,20 @@ async function sumReturnedQuantity(
   );
 }
 
+async function soldQuantityForSale(
+  sale: SaleMovementDoc,
+  session?: ClientSession | null
+): Promise<number> {
+  return effectiveInvoiceSoldQuantity({
+    quantity: sale.quantity,
+    invoiceSoldQuantity: sale.invoiceSoldQuantity,
+    soldAdjustFromCorrections: await sumInvoiceQtyCorrectionSoldAdjust(
+      sale._id,
+      session
+    ),
+  });
+}
+
 async function mapSaleToLine(
   sale: SaleMovementDoc,
   session?: ClientSession | null
@@ -207,7 +224,7 @@ async function mapSaleToLine(
   const product = sale.productIdPop;
   const brand = sale.brandIdPop;
   const returnedQuantity = await sumReturnedQuantity(sale, session);
-  const soldQuantity = sale.quantity;
+  const soldQuantity = await soldQuantityForSale(sale, session);
 
   return {
     saleMovementId: String(sale._id),
@@ -511,7 +528,13 @@ export async function listClientReturnInvoices(
 
     const key = buildClientReturnGroupKey(invoiceNumber, clientName, warehouseId);
     const returnedQuantity = returnedQuantityForSale(sale);
-    const returnableQuantity = Math.max(sale.quantity - returnedQuantity, 0);
+    const soldQuantity = effectiveInvoiceSoldQuantity({
+      quantity: sale.quantity,
+      invoiceSoldQuantity: sale.invoiceSoldQuantity,
+      // Summary list skips per-row correction aggregation for speed; heal +
+      // invoiceSoldQuantity cover edited lines. Unedited lines use quantity.
+    });
+    const returnableQuantity = Math.max(soldQuantity - returnedQuantity, 0);
     const saleDate =
       sale.createdAt instanceof Date
         ? sale.createdAt.toISOString()
@@ -612,6 +635,7 @@ async function createReturnMovement(
         productId: new Types.ObjectId(productId),
         brandId: new Types.ObjectId(brandId),
         quantity,
+        balanceAfter: newQty,
         clientName: sale.clientName,
         invoiceNumber: sale.invoiceNumber,
         relatedSaleMovementId: sale._id,
@@ -675,7 +699,7 @@ async function syncAndClaimClientReturnQuantity(
           {
             $add: [{ $ifNull: ["$clientReturnedQuantity", 0] }, quantity],
           },
-          "$quantity",
+          { $ifNull: ["$invoiceSoldQuantity", "$quantity"] },
         ],
       },
     },
@@ -688,7 +712,12 @@ async function syncAndClaimClientReturnQuantity(
       .session(session ?? null)
       .lean();
     const already = latest?.clientReturnedQuantity ?? ledgerReturned;
-    const returnable = Math.max(0, (latest?.quantity ?? sale.quantity) - already);
+    const soldCeiling =
+      typeof latest?.invoiceSoldQuantity === "number" &&
+      Number.isFinite(latest.invoiceSoldQuantity)
+        ? latest.invoiceSoldQuantity
+        : (latest?.quantity ?? sale.quantity);
+    const returnable = Math.max(0, soldCeiling - already);
     throw new BadRequestError(
       `Cannot return ${quantity} — only ${returnable} remaining on this line`
     );
@@ -741,7 +770,7 @@ export async function submitClientReturn(input: ClientReturnSubmitInput, user: A
     assertNonNegativeIntegerQuantity(input.quantity, "Sold quantity");
 
     const sale = await loadSaleMovement(input.saleMovementId);
-    const previousQuantity = sale.quantity;
+    const previousQuantity = await soldQuantityForSale(sale);
     const warehouseId = saleWarehouseId(sale);
     const productId = refId(sale.productId);
 
@@ -772,7 +801,7 @@ export async function submitClientReturn(input: ClientReturnSubmitInput, user: A
     return {
       mode: input.mode,
       updatedMovementId: row.id,
-      quantity: row.quantity,
+      quantity: row.invoiceSoldQuantity ?? row.quantity,
       previousQuantity,
       inventoryDelta,
       balanceBefore,

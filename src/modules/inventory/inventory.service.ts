@@ -14,7 +14,11 @@ import { dbSession, runInTransaction } from "../../shared/utils/mongoTransaction
 import * as balanceService from "../stock/inventory.service.js";
 import {
   INVOICE_QTY_CORRECTION_NOTE_PREFIX,
+  effectiveInvoiceSoldQuantity,
+  historicalSaleQuantityFromCorrections,
+  restoreHistoricalSaleQuantityIfMutated,
   saleQuantityInventoryDelta,
+  sumInvoiceQtyCorrectionSoldAdjust,
   sumReturnedQuantityForSale,
 } from "../stock/saleReturn.utils.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
@@ -458,6 +462,8 @@ type MovementDoc = {
   _id: Types.ObjectId;
   type: string;
   quantity: number;
+  invoiceSoldQuantity?: number;
+  balanceAfter?: number;
   dispatchType?: string;
   clientName?: string;
   invoiceNumber?: string;
@@ -510,6 +516,15 @@ function mapMovementRow(m: MovementDoc) {
     id: String(m._id),
     type: m.type as "STOCK_IN" | "STOCK_OUT",
     quantity: m.quantity,
+    invoiceSoldQuantity:
+      typeof m.invoiceSoldQuantity === "number" && Number.isFinite(m.invoiceSoldQuantity)
+        ? m.invoiceSoldQuantity
+        : undefined,
+    /** Prefer frozen snapshot; listMovementHistory may still override for legacy rows. */
+    remainingStock:
+      typeof m.balanceAfter === "number" && Number.isFinite(m.balanceAfter)
+        ? m.balanceAfter
+        : undefined,
     dispatchType: m.dispatchType,
     clientName: m.clientName,
     invoiceNumber: m.invoiceNumber,
@@ -541,6 +556,82 @@ function mapMovementRow(m: MovementDoc) {
       : undefined,
     createdAt: m.createdAt,
   };
+}
+
+/**
+ * Heal sale rows whose `quantity` was rewritten by older invoice edits, using
+ * the earliest correction note (`sold 15 → 10`). Writes invoiceSoldQuantity when
+ * missing so Invoices keep the current billed qty.
+ */
+async function healMutatedSaleQuantities(movements: MovementDoc[]) {
+  const saleIds = movements
+    .filter(
+      (m) =>
+        m.type === StockMovementType.STOCK_OUT &&
+        m.dispatchType === DispatchType.DIRECT_SELLING
+    )
+    .map((m) => m._id);
+
+  if (saleIds.length === 0) return;
+
+  const corrections = await StockMovement.find({
+    relatedSaleMovementId: { $in: saleIds },
+    notes: {
+      $regex: `^${INVOICE_QTY_CORRECTION_NOTE_PREFIX}`,
+      $options: "i",
+    },
+  })
+    .sort({ createdAt: 1 })
+    .select("relatedSaleMovementId notes")
+    .lean();
+
+  const firstNotesBySale = new Map<string, string>();
+  for (const row of corrections) {
+    const key = String(row.relatedSaleMovementId);
+    if (!firstNotesBySale.has(key) && row.notes) {
+      firstNotesBySale.set(key, row.notes);
+    }
+  }
+
+  const bulk: Array<{
+    updateOne: {
+      filter: { _id: Types.ObjectId };
+      update: { $set: Record<string, number> };
+    };
+  }> = [];
+
+  for (const m of movements) {
+    if (
+      m.type !== StockMovementType.STOCK_OUT ||
+      m.dispatchType !== DispatchType.DIRECT_SELLING
+    ) {
+      continue;
+    }
+    const notes = firstNotesBySale.get(String(m._id));
+    const historical = historicalSaleQuantityFromCorrections(m.quantity, notes);
+    if (historical === m.quantity) continue;
+
+    const setFields: Record<string, number> = { quantity: historical };
+    if (
+      m.invoiceSoldQuantity == null ||
+      !Number.isFinite(m.invoiceSoldQuantity)
+    ) {
+      // Preserve the rewritten value as current billed qty before restoring.
+      setFields.invoiceSoldQuantity = m.quantity;
+      m.invoiceSoldQuantity = m.quantity;
+    }
+    m.quantity = historical;
+    bulk.push({
+      updateOne: {
+        filter: { _id: m._id },
+        update: { $set: setFields },
+      },
+    });
+  }
+
+  if (bulk.length > 0) {
+    await StockMovement.bulkWrite(bulk, { ordered: false });
+  }
 }
 
 function describeMovement(m: {
@@ -698,6 +789,8 @@ export async function getStockItemDetail(query: StockItemDetailQuery) {
     .populate("createdBy", "name")
     .lean()) as MovementDoc[];
 
+  await healMutatedSaleQuantities(allMovements);
+
   const totalsByType = await StockMovement.aggregate([
     { $match: movementFilter },
     {
@@ -715,10 +808,17 @@ export async function getStockItemDetail(query: StockItemDetailQuery) {
     if (t._id === StockMovementType.STOCK_OUT) totalStockOut = t.total;
   }
 
-  // Running balances must be computed on the chronological (createdAt desc)
-  // order returned by the query; each row's balanceAfter is then fixed, so we
-  // can safely re-order rows for display by the requested sort field.
-  const ledger = applyRunningBalances(currentQuantity, allMovements);
+  // Prefer immutable snapshots written on each movement; fall back to a live
+  // running reconstruction only when balanceAfter was never stored (legacy rows).
+  const ledger = applyRunningBalances(currentQuantity, allMovements).map(
+    (entry, index) => {
+      const stored = allMovements[index]?.balanceAfter;
+      if (typeof stored === "number" && Number.isFinite(stored)) {
+        return { ...entry, balanceAfter: stored };
+      }
+      return entry;
+    }
+  );
   const sortedLedger = sortRows(ledger, query.sortBy, query.sortOrder ?? "desc", {
     createdAt: (r) => new Date(r.createdAt).getTime(),
     quantity: (r) => r.quantity,
@@ -758,11 +858,17 @@ export async function getStockItemDetail(query: StockItemDetailQuery) {
   };
 }
 
-export async function listMovementHistory(query: MovementsQuery) {
+export async function listMovementHistory(
+  query: MovementsQuery & { warehouseIds?: string[] }
+) {
   const filter: Record<string, unknown> = {};
 
   if (query.warehouseId && Types.ObjectId.isValid(query.warehouseId)) {
     filter.warehouseId = query.warehouseId;
+  } else if (query.warehouseIds && query.warehouseIds.length > 0) {
+    filter.warehouseId = {
+      $in: query.warehouseIds.filter((id) => Types.ObjectId.isValid(id)),
+    };
   }
   if (query.brandId && Types.ObjectId.isValid(query.brandId)) {
     filter.brandId = query.brandId;
@@ -820,8 +926,9 @@ export async function listMovementHistory(query: MovementsQuery) {
   ]);
 
   const pageMovements = movements as MovementDoc[];
+  await healMutatedSaleQuantities(pageMovements);
 
-  /** Per warehouse+product: current on-hand qty and oldest createdAt on this page. */
+  /** Per warehouse+product: oldest createdAt among page rows that lack a frozen balanceAfter. */
   const pairState = new Map<
     string,
     {
@@ -832,6 +939,9 @@ export async function listMovementHistory(query: MovementsQuery) {
   >();
 
   for (const m of pageMovements) {
+    if (typeof m.balanceAfter === "number" && Number.isFinite(m.balanceAfter)) {
+      continue;
+    }
     const warehouseId = extractObjectId(m.warehouseId);
     const productId = extractObjectId(m.productId);
     if (!warehouseId || !productId) continue;
@@ -872,8 +982,8 @@ export async function listMovementHistory(query: MovementsQuery) {
     ])
   );
 
-  // Remaining stock must be balance-after each movement, not the live on-hand
-  // qty pasted onto every row (which made consecutive +400s look unchanged).
+  // Legacy rows without balanceAfter: reconstruct from live balance (best effort).
+  // New rows always carry an immutable snapshot written at movement time.
   const remainingByMovementId = new Map<string, number>();
 
   await Promise.all(
@@ -897,6 +1007,9 @@ export async function listMovementHistory(query: MovementsQuery) {
 
   const items = pageMovements.map((m) => {
     const row = mapMovementRow(m);
+    if (typeof row.remainingStock === "number" && Number.isFinite(row.remainingStock)) {
+      return row;
+    }
     const key =
       row.warehouse?.id && row.product?.id
         ? `${row.warehouse.id}:${row.product.id}`
@@ -913,10 +1026,13 @@ export async function listMovementHistory(query: MovementsQuery) {
   };
 }
 
-export async function listLowStock(query: LowStockQuery) {
+export async function listLowStock(query: LowStockQuery & { warehouseIds?: string[] }) {
   const sharedFilters = {
     brandId: query.brandId,
     includeZero: true as const,
+    ...(query.warehouseIds && query.warehouseIds.length > 0
+      ? { warehouseIds: query.warehouseIds }
+      : {}),
   };
 
   const [warehouseScopedRows, allWarehouseRows] = await Promise.all([
@@ -1221,6 +1337,7 @@ export async function adjustStockBalance(input: AdjustStockInput, user: AuthUser
             productId,
             brandId,
             quantity: Math.abs(delta),
+            balanceAfter: next,
             notes: input.reason
               ? `Admin adjustment: ${input.reason}`
               : "Admin adjustment",
@@ -1598,7 +1715,7 @@ async function resolveInvoiceMovementFilter(
   query: Pick<InvoiceListQuery, "search" | "warehouseId" | "clientId">
 ) {
   // Only live client sales. Returns and quantity-correction ledger rows are excluded —
-  // sale lines already hold the latest editable quantities.
+  // sale lines expose current billed qty via invoiceSoldQuantity (see fetch).
   const filter: Record<string, unknown> = {
     $and: [
       {
@@ -1660,15 +1777,33 @@ async function fetchInvoiceMovementRows(
 ) {
   const filter = await resolveInvoiceMovementFilter(query);
 
-  const movements = await StockMovement.find(filter)
+  const movements = (await StockMovement.find(filter)
     .sort({ createdAt: -1 })
     .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
     .populate("brandId", "name")
     .populate("warehouseId", "name code")
     .populate("destinationWarehouseId", "name code")
-    .lean();
+    .lean()) as MovementDoc[];
 
-  return (movements as MovementDoc[]).map((m) => mapMovementRow(m));
+  await healMutatedSaleQuantities(movements);
+
+  const adjustBySale = new Map<string, number>();
+  await Promise.all(
+    movements.map(async (m) => {
+      const adjust = await sumInvoiceQtyCorrectionSoldAdjust(m._id);
+      adjustBySale.set(String(m._id), adjust);
+    })
+  );
+
+  return movements.map((m) => {
+    const row = mapMovementRow(m);
+    const quantity = effectiveInvoiceSoldQuantity({
+      quantity: m.quantity,
+      invoiceSoldQuantity: m.invoiceSoldQuantity,
+      soldAdjustFromCorrections: adjustBySale.get(String(m._id)) ?? 0,
+    });
+    return { ...row, quantity };
+  });
 }
 
 function voucherTypeLabel(row: ReturnType<typeof mapMovementRow>): string {
@@ -1899,7 +2034,18 @@ export async function updateMovementInvoice(
         throw new BadRequestError("Quantity can only be updated on client sale invoices");
       }
 
-      const previousQuantity = lineMovement.quantity;
+      // Restore original sale qty before reading current billed qty (legacy edits
+      // used to overwrite `quantity`).
+      await restoreHistoricalSaleQuantityIfMutated(lineMovement, session);
+
+      const previousQuantity = effectiveInvoiceSoldQuantity({
+        quantity: lineMovement.quantity,
+        invoiceSoldQuantity: lineMovement.invoiceSoldQuantity,
+        soldAdjustFromCorrections: await sumInvoiceQtyCorrectionSoldAdjust(
+          lineMovement._id,
+          session
+        ),
+      });
       const nextQuantity = update.quantity;
       if (nextQuantity === previousQuantity) {
         continue;
@@ -1938,8 +2084,21 @@ export async function updateMovementInvoice(
           session
         );
       }
+
+      // Freeze remaining snapshot so past log remaining does not jump.
+      if (
+        lineMovement.balanceAfter == null ||
+        !Number.isFinite(lineMovement.balanceAfter)
+      ) {
+        lineMovement.balanceAfter = await balanceService.getBalance(
+          extractObjectId(lineMovement.warehouseId) ?? "",
+          extractObjectId(lineMovement.productId) ?? "",
+          session
+        );
+      }
+
       if (delta !== 0) {
-        await balanceService.adjustBalance(
+        const balanceAfter = await balanceService.adjustBalance(
           extractObjectId(lineMovement.warehouseId) ?? "",
           extractObjectId(lineMovement.productId) ?? "",
           delta,
@@ -1957,6 +2116,7 @@ export async function updateMovementInvoice(
               productId: lineMovement.productId,
               brandId: lineMovement.brandId,
               quantity: Math.abs(delta),
+              balanceAfter,
               clientName: lineMovement.clientName,
               invoiceNumber: lineMovement.invoiceNumber,
               relatedSaleMovementId: lineMovement._id,
@@ -1968,20 +2128,26 @@ export async function updateMovementInvoice(
         );
       }
 
-      lineMovement.quantity = nextQuantity;
+      // Current billed qty for Invoices / returns only — never rewrite historical quantity.
+      lineMovement.invoiceSoldQuantity = nextQuantity;
       lineMovement.invoiceModificationCount =
         (lineMovement.invoiceModificationCount ?? 0) + 1;
       await lineMovement.save({ session });
 
-      const lineRow = mapMovementRow(
-        (await StockMovement.findById(lineMovement._id)
-          .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
-          .populate("brandId", "name")
-          .populate("warehouseId", "name code")
-          .populate("destinationWarehouseId", "name code")
-          .session(session ?? null)
-          .lean()) as MovementDoc
-      );
+      const lineRow = {
+        ...mapMovementRow(
+          (await StockMovement.findById(lineMovement._id)
+            .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
+            .populate("brandId", "name")
+            .populate("warehouseId", "name code")
+            .populate("destinationWarehouseId", "name code")
+            .session(session ?? null)
+            .lean()) as MovementDoc
+        ),
+        // Invoice/edit clients expect the current billed qty on `quantity`.
+        quantity: nextQuantity,
+        invoiceSoldQuantity: nextQuantity,
+      };
 
       await AuditLog.create(
         [

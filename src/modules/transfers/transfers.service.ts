@@ -469,6 +469,7 @@ export async function updateTransferStatus(
             productId: claimed.productId,
             brandId: claimed.brandId,
             quantity: claimed.quantity,
+            balanceAfter: newQty,
             transferId: claimed._id,
             notes:
               input.notes?.trim() ||
@@ -547,6 +548,7 @@ export async function updateTransferStatus(
             productId: claimed.productId,
             brandId: claimed.brandId,
             quantity: claimed.quantity,
+            balanceAfter: newQty,
             transferId: claimed._id,
             notes: note,
             createdBy: user.id,
@@ -669,6 +671,13 @@ export async function returnTransfer(
       input.notes?.trim() ||
       `Goods returned to ${sourceId} — transfer ${transferId}`;
 
+    const destBalance = await balanceService.adjustBalance(
+      destId,
+      productId,
+      -qty,
+      session
+    );
+
     const [outMovement] = await StockMovement.create(
       [
         {
@@ -677,31 +686,9 @@ export async function returnTransfer(
           productId: claimed.productId,
           brandId: claimed.brandId,
           quantity: qty,
+          balanceAfter: destBalance,
           transferId: claimed._id,
           notes: `Return to source warehouse: ${note}`,
-          createdBy: user.id,
-        },
-      ],
-      dbSession(session)
-    );
-
-    const destBalance = await balanceService.adjustBalance(
-      destId,
-      productId,
-      -qty,
-      session
-    );
-
-    const [inMovement] = await StockMovement.create(
-      [
-        {
-          type: StockMovementType.STOCK_IN,
-          warehouseId: claimed.sourceWarehouseId,
-          productId: claimed.productId,
-          brandId: claimed.brandId,
-          quantity: qty,
-          transferId: claimed._id,
-          notes: `Return from destination warehouse: ${note}`,
           createdBy: user.id,
         },
       ],
@@ -713,6 +700,23 @@ export async function returnTransfer(
       productId,
       qty,
       session
+    );
+
+    const [inMovement] = await StockMovement.create(
+      [
+        {
+          type: StockMovementType.STOCK_IN,
+          warehouseId: claimed.sourceWarehouseId,
+          productId: claimed.productId,
+          brandId: claimed.brandId,
+          quantity: qty,
+          balanceAfter: sourceBalance,
+          transferId: claimed._id,
+          notes: `Return from destination warehouse: ${note}`,
+          createdBy: user.id,
+        },
+      ],
+      dbSession(session)
     );
 
     await Transfer.updateOne(
@@ -843,6 +847,7 @@ export async function returnInTransitTransfer(
           productId: claimed.productId,
           brandId: claimed.brandId,
           quantity: claimed.quantity,
+          balanceAfter: newQty,
           transferId: claimed._id,
           notes: note,
           createdBy: user.id,

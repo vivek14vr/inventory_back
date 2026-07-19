@@ -10,6 +10,17 @@ export interface IStockMovement extends Document {
   productId: Types.ObjectId;
   brandId: Types.ObjectId;
   quantity: number;
+  /**
+   * Current billed/sold quantity for invoice edit UI and returns.
+   * The historical `quantity` on DIRECT_SELLING rows is never rewritten when
+   * an invoice qty is corrected — a separate correction movement is appended.
+   */
+  invoiceSoldQuantity?: number;
+  /**
+   * On-hand quantity at this warehouse+product immediately after this movement.
+   * Immutable once written — movements are append-only logs.
+   */
+  balanceAfter?: number;
   dispatchType?: DispatchTypeValue;
   clientName?: string;
   invoiceNumber?: string;
@@ -31,6 +42,8 @@ const stockMovementSchema = new Schema<IStockMovement>(
     productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     brandId: { type: Schema.Types.ObjectId, ref: "Brand", required: true },
     quantity: { type: Number, required: true, min: 0 },
+    invoiceSoldQuantity: { type: Number, min: 0 },
+    balanceAfter: { type: Number, min: 0 },
     dispatchType: { type: String, enum: ["TRANSFER", "DIRECT_SELLING"] },
     clientName: { type: String, trim: true },
     invoiceNumber: { type: String, trim: true },
