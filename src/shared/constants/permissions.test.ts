@@ -25,7 +25,6 @@ test("default warehouse operator grants scope only warehouse-scoped permissions"
       Permission.STOCK_IN,
       Permission.STOCK_OUT,
       Permission.RETURNS_CLIENT,
-      Permission.RETURNS_WAREHOUSE,
       Permission.TRANSFERS_VIEW,
       Permission.TRANSFERS_RECEIVE,
       Permission.CHECKLISTS_COMPLETE,

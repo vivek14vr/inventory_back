@@ -38,8 +38,15 @@ describe("hasPermission warehouse scoping", () => {
   });
 
   it("global permissions ignore warehouseId", () => {
-    const user = staff([{ code: Permission.REPORTS_VIEW }]);
-    assert.equal(hasPermission(user, Permission.REPORTS_VIEW), true);
-    assert.equal(hasPermission(user, Permission.REPORTS_VIEW, "wh-1"), true);
+    const user = staff([{ code: Permission.PRODUCTS_VIEW }]);
+    assert.equal(hasPermission(user, Permission.PRODUCTS_VIEW), true);
+    assert.equal(hasPermission(user, Permission.PRODUCTS_VIEW, "wh-1"), true);
+  });
+
+  it("products.manage implies products.view", () => {
+    const user = staff([{ code: Permission.PRODUCTS_MANAGE }]);
+    assert.equal(hasPermission(user, Permission.PRODUCTS_MANAGE), true);
+    assert.equal(hasPermission(user, Permission.PRODUCTS_VIEW), true);
+    assert.equal(hasPermissionSomewhere(user, Permission.PRODUCTS_VIEW), true);
   });
 });

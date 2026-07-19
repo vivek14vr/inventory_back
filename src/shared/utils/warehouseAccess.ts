@@ -56,11 +56,12 @@ export function getStaffVisibleWarehouseIds(user: AuthUser): string[] {
 /**
  * Scope Check Stock / inventory browse queries.
  * Company-wide (INVENTORY_VIEW / admin): optional single warehouse filter.
- * Warehouse staff (STOCK_VIEW): always limited to granted warehouses.
+ * Warehouse staff: limited to warehouses granted for the given tab permission(s).
  */
 export function resolveCheckStockWarehouseScope(
   user: AuthUser,
-  requestedWarehouseId?: string
+  requestedWarehouseId?: string,
+  permission: PermissionCode | PermissionCode[] = Permission.STOCK_VIEW
 ): { warehouseId?: string; warehouseIds?: string[] } {
   const requested = requestedWarehouseId?.trim() || undefined;
 
@@ -68,7 +69,10 @@ export function resolveCheckStockWarehouseScope(
     return requested ? { warehouseId: requested } : {};
   }
 
-  const allowed = getWarehouseIdsForPermission(user, Permission.STOCK_VIEW);
+  const codes = Array.isArray(permission) ? permission : [permission];
+  const allowed = [
+    ...new Set(codes.flatMap((code) => getWarehouseIdsForPermission(user, code))),
+  ];
   if (allowed.length === 0) {
     throw new ForbiddenError("You do not have permission to view stock");
   }

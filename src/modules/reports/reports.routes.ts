@@ -2,7 +2,7 @@ import { Router, type Response } from "express";
 import { Permission } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
-import { requireAdminOrPermission } from "../../shared/middleware/requirePermission.js";
+import { requireAnyPermission } from "../../shared/middleware/requirePermission.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as reportsService from "./reports.service.js";
@@ -15,7 +15,12 @@ import {
 
 const router = Router();
 
-router.use(authenticate, requireAdminOrPermission(Permission.REPORTS_VIEW));
+router.use(
+  authenticate,
+  requireAnyPermission([Permission.REPORTS_VIEW], {
+    allowScopedWithoutWarehouseId: true,
+  })
+);
 
 async function handleExport(
   reportType: string,

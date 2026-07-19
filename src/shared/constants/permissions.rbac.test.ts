@@ -22,9 +22,9 @@ describe("RBAC permission aliases stay module-strict", () => {
     assert.ok(!CLIENT_RETURN_PERMISSIONS.includes(Permission.STOCK_VIEW));
   });
 
-  it("warehouse returns require returns.warehouse only — not stock/transfers aliases", () => {
+  it("warehouse / transfer returns require transfers.manage — not stock aliases", () => {
     assert.deepEqual(WAREHOUSE_RETURN_PERMISSIONS, [
-      Permission.RETURNS_WAREHOUSE,
+      Permission.TRANSFERS_MANAGE,
     ]);
     assert.ok(!WAREHOUSE_RETURN_PERMISSIONS.includes(Permission.STOCK_IN));
     assert.ok(!WAREHOUSE_RETURN_PERMISSIONS.includes(Permission.STOCK_OUT));
@@ -32,7 +32,7 @@ describe("RBAC permission aliases stay module-strict", () => {
       !WAREHOUSE_RETURN_PERMISSIONS.includes(Permission.TRANSFERS_RECEIVE)
     );
     assert.ok(
-      !WAREHOUSE_RETURN_PERMISSIONS.includes(Permission.TRANSFERS_MANAGE)
+      !WAREHOUSE_RETURN_PERMISSIONS.includes(Permission.RETURNS_WAREHOUSE)
     );
   });
 

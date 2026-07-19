@@ -34,7 +34,9 @@ function resolveBalanceWarehouseFilter(
     if (
       !isAdmin(user) &&
       !hasPermission(user, Permission.INVENTORY_VIEW) &&
-      !hasPermission(user, Permission.STOCK_VIEW, warehouseId)
+      !hasPermission(user, Permission.STOCK_VIEW, warehouseId) &&
+      !hasPermission(user, Permission.STOCK_MOVEMENTS, warehouseId) &&
+      !hasPermission(user, Permission.STOCK_LOW, warehouseId)
     ) {
       throw new ForbiddenError("You do not have access to this warehouse");
     }
@@ -48,7 +50,13 @@ function resolveBalanceWarehouseFilter(
     return { warehouseFilter: {}, quantityScope: "total" };
   }
 
-  const stockWarehouses = getWarehouseIdsForPermission(user, Permission.STOCK_VIEW);
+  const stockWarehouses = [
+    ...new Set([
+      ...getWarehouseIdsForPermission(user, Permission.STOCK_VIEW),
+      ...getWarehouseIdsForPermission(user, Permission.STOCK_MOVEMENTS),
+      ...getWarehouseIdsForPermission(user, Permission.STOCK_LOW),
+    ]),
+  ];
   if (stockWarehouses.length === 0) {
     throw new ForbiddenError("You do not have permission to search products");
   }

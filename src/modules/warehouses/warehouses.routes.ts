@@ -28,7 +28,11 @@ router.get(
   requireAnyPermission([
     Permission.WAREHOUSES_VIEW,
     Permission.WAREHOUSES_MANAGE,
+    Permission.PRODUCTS_VIEW,
+    Permission.PRODUCTS_MANAGE,
     Permission.STOCK_VIEW,
+    Permission.STOCK_MOVEMENTS,
+    Permission.STOCK_LOW,
     Permission.STOCK_IN,
     Permission.STOCK_OUT,
     Permission.RETURNS_CLIENT,
@@ -50,11 +54,13 @@ router.get(
     const includeInactive =
       canManage && req.query.includeInactive === "true";
     // Transfer senders need every active site as a destination, even without
-    // grants there. Warehouse managers / admins also see the full list.
+    // grants there. Warehouse / product managers / admins also see the full list
+    // (product thresholds are set per warehouse).
     const canListAllSites =
       isAdmin(req.user!) ||
       canManage ||
       hasPermissionSomewhere(req.user!, Permission.WAREHOUSES_VIEW) ||
+      hasPermissionSomewhere(req.user!, Permission.PRODUCTS_MANAGE) ||
       hasPermissionSomewhere(req.user!, Permission.STOCK_OUT) ||
       hasPermissionSomewhere(req.user!, Permission.TRANSFERS_MANAGE);
     const scopeIds = canListAllSites

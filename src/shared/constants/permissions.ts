@@ -5,6 +5,12 @@ export const Permission = {
   STOCK_VIEW: "stock.view",
   STOCK_IN: "stock.in",
   STOCK_OUT: "stock.out",
+  /** Show Check Stock row Actions (History / Return / Update). */
+  STOCK_ACTIONS: "stock.actions",
+  /** Check Stock → Movements tab */
+  STOCK_MOVEMENTS: "stock.movements",
+  /** Check Stock → Low stock tab */
+  STOCK_LOW: "stock.low",
 
   RETURNS_CLIENT: "returns.client",
   RETURNS_WAREHOUSE: "returns.warehouse",
@@ -114,7 +120,7 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     id: "stock-out",
     label: "Stock Out",
     description:
-      "Record sales and other issues from a warehouse. Also required to create a transfer from that warehouse.",
+      "Record sales and other issues from a warehouse. Creating a send also needs Create transfer for that warehouse.",
     warehouseScoped: true,
     navGroup: "main",
     permissions: [
@@ -128,39 +134,48 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
   },
   {
     id: "transfer",
-    label: "Transfer",
+    label: "Send Stock",
     description:
-      "Move stock between warehouses. Covers Transfer and Transfer History in the menu. Most staff only need View + Receive at their home warehouse; creating a send still needs Stock Out at the source.",
+      "Create and receive inter-warehouse transfers. Creating a send also needs Stock Out at the source warehouse.",
     warehouseScoped: true,
     navGroup: "main",
     permissions: [
       {
         code: Permission.TRANSFERS_VIEW,
-        label: "View transfers",
-        description: "See shipments for this warehouse (Transfer page and Transfer History).",
-        example: "Goregaon staff see a shipment pending from Vasai.",
+        label: "Create transfer",
+        description:
+          "Open Send Stock and create a send from this warehouse (also needs Stock Out here).",
+        example: "Send 20 boxes from Goregaon to Vasai.",
       },
       {
         code: Permission.TRANSFERS_RECEIVE,
         label: "Receive transfers",
-        description: "Mark goods as arrived and add them to this warehouse’s stock.",
+        description: "Receive incoming stock at this warehouse from the Send Stock page.",
         example: "Confirm a 20-box transfer arrived at Goregaon.",
       },
+    ],
+  },
+  {
+    id: "transfer-history",
+    label: "Transfer History",
+    description:
+      "Grant per warehouse. Shows Transfer History for transfers sent from that warehouse (not inbound from elsewhere).",
+    warehouseScoped: true,
+    navGroup: "more",
+    permissions: [
       {
         code: Permission.TRANSFERS_MANAGE,
-        label: "Manage all transfer history",
+        label: "Manage transfer history",
         description:
-          "Company-wide: review every warehouse’s history and cancel or update stuck transfers.",
-        example: "Cancel a stuck Vasai → Goregaon transfer.",
-        warehouseScoped: false,
+          "View/manage transfers sent from this warehouse (receive actions, returns, cancel/update on those rows).",
+        example: "Goregaon manage shows Goregaon → Vasai, not Vasai → Goregaon.",
       },
     ],
   },
   {
     id: "return",
     label: "Return",
-    description:
-      "Client invoice returns and warehouse transfer returns at a specific location.",
+    description: "Client invoice returns at a specific warehouse (sold-qty corrections).",
     warehouseScoped: true,
     navGroup: "main",
     permissions: [
@@ -172,29 +187,40 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
         example:
           "Reduce invoice #1042 from 200 to 0 pieces so stock is added back to Goregaon.",
       },
-      {
-        code: Permission.RETURNS_WAREHOUSE,
-        label: "Warehouse transfer returns",
-        description:
-          "Return received or in-transit transfers back to the source warehouse.",
-        example:
-          "Send a pending Vasai → Goregaon shipment back before it is received.",
-      },
     ],
   },
   {
     id: "check-stock",
     label: "Check Stock",
     description:
-      "See on-hand balances at a warehouse. Company-wide inventory browse lives under Invoices for admins.",
+      "Check Stock tabs and Actions. Grant each tab separately; company-wide inventory browse lives under Invoices for admins.",
     warehouseScoped: true,
     navGroup: "main",
     permissions: [
       {
         code: Permission.STOCK_VIEW,
-        label: "View stock at warehouse",
-        description: "See how much of each product is on hand at the warehouse.",
-        example: "Check that Goregaon has 40 boxes of Product A before dispatch.",
+        label: "Current stock tab",
+        description: "Open Check Stock → Current stock for this warehouse.",
+        example: "See Goregaon on-hand quantities by product.",
+      },
+      {
+        code: Permission.STOCK_MOVEMENTS,
+        label: "Movements tab",
+        description: "Open Check Stock → Movements for this warehouse.",
+        example: "Review stock in/out history at Goregaon.",
+      },
+      {
+        code: Permission.STOCK_LOW,
+        label: "Low stock tab",
+        description: "Open Check Stock → Low stock for this warehouse.",
+        example: "See which Goregaon products are below threshold.",
+      },
+      {
+        code: Permission.STOCK_ACTIONS,
+        label: "Stock actions column",
+        description:
+          "Show the Actions column on Current stock (History, and Return/Update when those modules are also granted).",
+        example: "Let Goregaon staff open History or Return from the stock table.",
       },
     ],
   },
@@ -225,15 +251,16 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
   {
     id: "reports",
     label: "Reports",
-    description: "Operational reports and CSV downloads.",
-    warehouseScoped: false,
+    description: "Operational reports and CSV downloads for the warehouses you allow.",
+    warehouseScoped: true,
     navGroup: "main",
     permissions: [
       {
         code: Permission.REPORTS_VIEW,
         label: "View & export reports",
-        description: "Open Reports and download CSV exports.",
-        example: "Export monthly stock movement report for accounting.",
+        description:
+          "Open Reports and download CSV exports for this warehouse only.",
+        example: "Export Goregaon stock movement report for accounting.",
       },
     ],
   },
@@ -265,14 +292,15 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
       {
         code: Permission.PRODUCTS_VIEW,
         label: "View products",
-        description: "Open the Products page and product detail.",
+        description: "Open the Products page and browse the catalogue (read-only).",
         example: "Look up pack size and low-stock threshold for Product C.",
       },
       {
         code: Permission.PRODUCTS_MANAGE,
-        label: "Create & edit products",
-        description: "Add products, set stock units, thresholds, and active status.",
-        example: "Create “Widget XL” with 800 kg per box and threshold 5 boxes.",
+        label: "Manage products",
+        description:
+          "Includes View. Add, edit, deactivate, and delete products; set units and low-stock alerts.",
+        example: "Create “Widget XL” with 800 pieces per carton and threshold 5 cartons.",
       },
     ],
   },
@@ -285,14 +313,15 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     permissions: [
       {
         code: Permission.WAREHOUSES_VIEW,
-        label: "View warehouse list",
+        label: "View warehouses",
         description: "Open the Warehouses page and see location details.",
         example: "Review all active depots before assigning a user’s home warehouse.",
       },
       {
         code: Permission.WAREHOUSES_MANAGE,
-        label: "Create & edit warehouses",
-        description: "Add new locations or deactivate old ones.",
+        label: "Manage warehouses",
+        description:
+          "Includes View. Create, rename, or set warehouses active/inactive.",
         example: "Add “Pune depot” or mark a closed site as inactive.",
       },
     ],
@@ -312,8 +341,8 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
       },
       {
         code: Permission.BRANDS_MANAGE,
-        label: "Create & edit brands",
-        description: "Add, rename, or deactivate brands.",
+        label: "Manage brands",
+        description: "Includes View. Add, rename, or deactivate brands.",
         example: "Add brand “Acme” or deactivate a discontinued line.",
       },
     ],
@@ -333,8 +362,8 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
       },
       {
         code: Permission.CLIENTS_MANAGE,
-        label: "Create & edit clients",
-        description: "Add, rename, or deactivate clients.",
+        label: "Manage clients",
+        description: "Includes View. Add, rename, or deactivate clients.",
         example: "Add client “Acme Corp” with secondary name “Acme Mumbai”.",
       },
     ],
@@ -411,14 +440,28 @@ export const ALL_PERMISSION_CODES: PermissionCode[] = PERMISSION_MODULES.flatMap
   m.permissions.map((p) => p.code)
 );
 
+/**
+ * Codes still accepted on write so existing DB grants can be migrated.
+ * Prefer {@link ALL_PERMISSION_CODES} for new grants / catalog.
+ */
+export const LEGACY_PERMISSION_CODES: readonly PermissionCode[] = [
+  Permission.RETURNS_WAREHOUSE,
+];
+
+/** Zod / write-path: current + legacy codes (legacy migrated in normalize). */
+export const ACCEPTED_PERMISSION_CODES: PermissionCode[] = [
+  ...ALL_PERMISSION_CODES,
+  ...LEGACY_PERMISSION_CODES,
+];
+
 /** Permissions that grant client return (invoice sold-qty correction). */
 export const CLIENT_RETURN_PERMISSIONS: PermissionCode[] = [
   Permission.RETURNS_CLIENT,
 ];
 
-/** Permissions that grant warehouse transfer returns. */
+/** Permissions that grant warehouse transfer returns (via Transfer History manage). */
 export const WAREHOUSE_RETURN_PERMISSIONS: PermissionCode[] = [
-  Permission.RETURNS_WAREHOUSE,
+  Permission.TRANSFERS_MANAGE,
 ];
 
 /** Permissions that grant reading warehouse stock balances. */
@@ -438,14 +481,32 @@ export const ADMIN_ONLY_PERMISSIONS: readonly PermissionCode[] = [
   Permission.INVENTORY_DASHBOARD,
   Permission.IMPORTS_MANAGE,
   Permission.AUDIT_VIEW,
-  Permission.TRANSFERS_MANAGE,
-  Permission.WAREHOUSES_MANAGE,
   Permission.USERS_MANAGE,
 ];
 
 export function isAdminOnlyPermission(code: string): boolean {
   return (ADMIN_ONLY_PERMISSIONS as readonly string[]).includes(code);
 }
+
+/**
+ * Company master-data: Manage always includes View.
+ * Checking View is satisfied when the matching Manage grant is held.
+ */
+export const MANAGE_IMPLIES_VIEW: Partial<
+  Record<PermissionCode, PermissionCode>
+> = {
+  [Permission.PRODUCTS_MANAGE]: Permission.PRODUCTS_VIEW,
+  [Permission.BRANDS_MANAGE]: Permission.BRANDS_VIEW,
+  [Permission.CLIENTS_MANAGE]: Permission.CLIENTS_VIEW,
+  [Permission.WAREHOUSES_MANAGE]: Permission.WAREHOUSES_VIEW,
+};
+
+/** View code → manage code that implies it (if any). */
+export const VIEW_IMPLIED_BY_MANAGE: Partial<
+  Record<PermissionCode, PermissionCode>
+> = Object.fromEntries(
+  Object.entries(MANAGE_IMPLIES_VIEW).map(([manage, view]) => [view, manage])
+) as Partial<Record<PermissionCode, PermissionCode>>;
 
 /** Default bundle for legacy warehouse operators */
 export function defaultWarehouseOperatorPermissions(
@@ -457,7 +518,6 @@ export function defaultWarehouseOperatorPermissions(
     { code: Permission.STOCK_IN, warehouseId },
     { code: Permission.STOCK_OUT, warehouseId },
     { code: Permission.RETURNS_CLIENT, warehouseId },
-    { code: Permission.RETURNS_WAREHOUSE, warehouseId },
     { code: Permission.TRANSFERS_VIEW, warehouseId },
     { code: Permission.TRANSFERS_RECEIVE, warehouseId },
     { code: Permission.CHECKLISTS_COMPLETE },

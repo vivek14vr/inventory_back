@@ -858,6 +858,99 @@ export async function getStockItemDetail(query: StockItemDetailQuery) {
   };
 }
 
+/**
+ * Map Movements UI "kind" filters to Mongo conditions (matches movementTypeLabel).
+ */
+function movementKindMongoFilter(
+  kind:
+    | "stock_in"
+    | "stock_out"
+    | "sale"
+    | "transfer_in"
+    | "transfer_out"
+    | "return"
+    | "adjustment"
+    | "invoice_edit"
+): Record<string, unknown> {
+  const notReturnOrCorrectionNotes = {
+    $or: [
+      { notes: { $exists: false } },
+      { notes: null },
+      { notes: "" },
+      {
+        notes: {
+          $not: /(client return|adjustment|^invoice quantity correction)/i,
+        },
+      },
+    ],
+  };
+  const noRelatedSale = {
+    $or: [
+      { relatedSaleMovementId: { $exists: false } },
+      { relatedSaleMovementId: null },
+    ],
+  };
+  const noTransferOrSaleDispatch = {
+    $or: [
+      { dispatchType: { $exists: false } },
+      { dispatchType: null },
+      { dispatchType: { $nin: [DispatchType.TRANSFER, DispatchType.DIRECT_SELLING] } },
+    ],
+  };
+
+  switch (kind) {
+    case "stock_in":
+      return {
+        $and: [
+          { type: StockMovementType.STOCK_IN },
+          noTransferOrSaleDispatch,
+          noRelatedSale,
+          notReturnOrCorrectionNotes,
+        ],
+      };
+    case "stock_out":
+      return {
+        $and: [
+          { type: StockMovementType.STOCK_OUT },
+          noTransferOrSaleDispatch,
+          noRelatedSale,
+          notReturnOrCorrectionNotes,
+        ],
+      };
+    case "sale":
+      return {
+        type: StockMovementType.STOCK_OUT,
+        dispatchType: DispatchType.DIRECT_SELLING,
+      };
+    case "transfer_in":
+      return {
+        type: StockMovementType.STOCK_IN,
+        dispatchType: DispatchType.TRANSFER,
+      };
+    case "transfer_out":
+      return {
+        type: StockMovementType.STOCK_OUT,
+        dispatchType: DispatchType.TRANSFER,
+      };
+    case "return":
+      return {
+        $or: [
+          { relatedSaleMovementId: { $exists: true, $ne: null } },
+          { notes: /client return/i },
+        ],
+      };
+    case "adjustment":
+      return { notes: /adjustment/i };
+    case "invoice_edit":
+      return {
+        notes: {
+          $regex: `^${INVOICE_QTY_CORRECTION_NOTE_PREFIX}`,
+          $options: "i",
+        },
+      };
+  }
+}
+
 export async function listMovementHistory(
   query: MovementsQuery & { warehouseIds?: string[] }
 ) {
@@ -876,7 +969,10 @@ export async function listMovementHistory(
   if (query.productId && Types.ObjectId.isValid(query.productId)) {
     filter.productId = query.productId;
   }
-  if (query.type) {
+  if (query.kind) {
+    const kindFilter = movementKindMongoFilter(query.kind);
+    Object.assign(filter, kindFilter);
+  } else if (query.type) {
     filter.type = query.type;
   }
   if (query.dateFrom || query.dateTo) {
@@ -899,7 +995,7 @@ export async function listMovementHistory(
       Brand.find({ name: regex }).distinct("_id"),
       Warehouse.find({ $or: [{ name: regex }, { code: regex }] }).distinct("_id"),
     ]);
-    filter.$or = [
+    const searchOr = [
       { productId: { $in: productIds } },
       { brandId: { $in: brandIds } },
       { warehouseId: { $in: warehouseIds } },
@@ -907,6 +1003,13 @@ export async function listMovementHistory(
       { invoiceNumber: regex },
       { clientName: regex },
     ];
+    if (filter.$and || filter.$or) {
+      const existing = { ...filter };
+      for (const key of Object.keys(filter)) delete filter[key];
+      filter.$and = [existing, { $or: searchOr }];
+    } else {
+      filter.$or = searchOr;
+    }
   }
 
   const { page, limit, skip, sortOrder } = getPaginationParams(query);
@@ -1027,20 +1130,29 @@ export async function listMovementHistory(
 }
 
 export async function listLowStock(query: LowStockQuery & { warehouseIds?: string[] }) {
-  const sharedFilters = {
+  // Never fetch company-wide rows for staff: when a single warehouse is selected,
+  // companion totals/columns must stay within that warehouse (or the staff scope list).
+  const scopedFilter = {
     brandId: query.brandId,
     includeZero: true as const,
-    ...(query.warehouseIds && query.warehouseIds.length > 0
-      ? { warehouseIds: query.warehouseIds }
-      : {}),
+    ...(query.warehouseId
+      ? { warehouseId: query.warehouseId }
+      : query.warehouseIds && query.warehouseIds.length > 0
+        ? { warehouseIds: query.warehouseIds }
+        : {}),
   };
 
   const [warehouseScopedRows, allWarehouseRows] = await Promise.all([
     fetchStockRows({
-      ...sharedFilters,
-      warehouseId: query.warehouseId,
+      brandId: query.brandId,
+      includeZero: true,
+      ...(query.warehouseId
+        ? { warehouseId: query.warehouseId }
+        : query.warehouseIds && query.warehouseIds.length > 0
+          ? { warehouseIds: query.warehouseIds }
+          : {}),
     }),
-    fetchStockRows(sharedFilters),
+    fetchStockRows(scopedFilter),
   ]);
 
   const warehouseLowRows = warehouseScopedRows.filter(isWarehouseLowStock);

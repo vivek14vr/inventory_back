@@ -1,10 +1,14 @@
 import { Types } from "mongoose";
 import { StockMovement } from "../../models/StockMovement.js";
 import { Transfer } from "../../models/Transfer.js";
+import { Permission } from "../../shared/constants/permissions.js";
 import { DispatchType, StockMovementType } from "../../shared/constants/roles.js";
 import { ForbiddenError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
-import { isAdmin } from "../../shared/utils/permissions.js";
+import {
+  getWarehouseIdsForPermission,
+  isAdmin,
+} from "../../shared/utils/permissions.js";
 import * as inventoryAdmin from "../inventory/inventory.service.js";
 import { INVOICE_QTY_CORRECTION_NOTE_PREFIX } from "../stock/saleReturn.utils.js";
 import type {
@@ -15,8 +19,17 @@ import type {
 } from "./reports.validation.js";
 import { buildDateFilter, toCsv } from "./reports.utils.js";
 
-/** Warehouses a staff user may see in reports (home + any scoped grant). */
+/** Warehouses a staff user may see in reports (reports.view grants only). */
 export function getStaffReportWarehouseIds(user: AuthUser): string[] {
+  const scoped = getWarehouseIdsForPermission(user, Permission.REPORTS_VIEW);
+  if (scoped.length > 0) return scoped;
+
+  // Legacy company-wide reports.view (no warehouseId on the grant).
+  const hasUnscoped = (user.permissions ?? []).some(
+    (g) => g.code === Permission.REPORTS_VIEW && !g.warehouseId
+  );
+  if (!hasUnscoped) return [];
+
   const ids = new Set<string>();
   if (user.warehouseId) ids.add(user.warehouseId);
   for (const grant of user.permissions ?? []) {
@@ -28,7 +41,7 @@ export function getStaffReportWarehouseIds(user: AuthUser): string[] {
 /**
  * Resolve warehouse scope for reports.
  * Admins: optional single warehouse filter.
- * Staff: must be limited to their warehouses; omit → all allowed ($in).
+ * Staff: limited to warehouses with reports.view; omit → all allowed ($in).
  */
 export function resolveReportWarehouseScope(
   user: AuthUser,
@@ -62,15 +75,21 @@ export function resolveReportWarehouseScope(
   return { warehouseIds: allowed };
 }
 
+function toObjectIds(ids: string[]): Types.ObjectId[] {
+  return ids
+    .filter((id) => Types.ObjectId.isValid(id))
+    .map((id) => new Types.ObjectId(id));
+}
+
 function applyWarehouseScope(
   filter: Record<string, unknown>,
   scope: { warehouseId?: string; warehouseIds?: string[] },
   field = "warehouseId"
 ): void {
-  if (scope.warehouseId) {
-    filter[field] = scope.warehouseId;
+  if (scope.warehouseId && Types.ObjectId.isValid(scope.warehouseId)) {
+    filter[field] = new Types.ObjectId(scope.warehouseId);
   } else if (scope.warehouseIds?.length) {
-    filter[field] = { $in: scope.warehouseIds };
+    filter[field] = { $in: toObjectIds(scope.warehouseIds) };
   }
 }
 
@@ -293,15 +312,17 @@ export async function reportTransfers(
   const scope = resolveReportWarehouseScope(user, query.warehouseId);
   const filter: Record<string, unknown> = {};
   if (query.status) filter.status = query.status;
-  if (scope.warehouseId) {
+  if (scope.warehouseId && Types.ObjectId.isValid(scope.warehouseId)) {
+    const warehouseOid = new Types.ObjectId(scope.warehouseId);
     filter.$or = [
-      { sourceWarehouseId: scope.warehouseId },
-      { destinationWarehouseId: scope.warehouseId },
+      { sourceWarehouseId: warehouseOid },
+      { destinationWarehouseId: warehouseOid },
     ];
   } else if (scope.warehouseIds?.length) {
+    const warehouseOids = toObjectIds(scope.warehouseIds);
     filter.$or = [
-      { sourceWarehouseId: { $in: scope.warehouseIds } },
-      { destinationWarehouseId: { $in: scope.warehouseIds } },
+      { sourceWarehouseId: { $in: warehouseOids } },
+      { destinationWarehouseId: { $in: warehouseOids } },
     ];
   }
   if (query.brandId && Types.ObjectId.isValid(query.brandId)) {

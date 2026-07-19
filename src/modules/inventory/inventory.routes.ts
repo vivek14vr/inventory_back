@@ -32,9 +32,26 @@ const requireInventoryAdjust = requireAdminOrAllPermissions([
   Permission.INVENTORY_ADJUST,
 ]);
 
-/** Admin company browse (INVENTORY_VIEW) or warehouse Check Stock (STOCK_VIEW). */
-const requireCheckStockRead = requireAnyPermission(
+/** Company-wide inventory browse or one Check Stock tab. */
+const requireCurrentStockRead = requireAnyPermission(
   [Permission.INVENTORY_VIEW, Permission.STOCK_VIEW],
+  { allowScopedWithoutWarehouseId: true }
+);
+const requireMovementsRead = requireAnyPermission(
+  [Permission.INVENTORY_VIEW, Permission.STOCK_MOVEMENTS],
+  { allowScopedWithoutWarehouseId: true }
+);
+const requireLowStockRead = requireAnyPermission(
+  [Permission.INVENTORY_VIEW, Permission.STOCK_LOW],
+  { allowScopedWithoutWarehouseId: true }
+);
+/** Item History / detail — Current stock or Actions (staff History link). */
+const requireStockItemDetailRead = requireAnyPermission(
+  [
+    Permission.INVENTORY_VIEW,
+    Permission.STOCK_VIEW,
+    Permission.STOCK_ACTIONS,
+  ],
   { allowScopedWithoutWarehouseId: true }
 );
 
@@ -49,13 +66,17 @@ router.get(
 
 router.get(
   "/stock",
-  requireCheckStockRead,
+  requireCurrentStockRead,
   asyncHandler(async (req, res) => {
     const parsed = stockQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const scope = resolveCheckStockWarehouseScope(req.user!, parsed.data.warehouseId);
+    const scope = resolveCheckStockWarehouseScope(
+      req.user!,
+      parsed.data.warehouseId,
+      Permission.STOCK_VIEW
+    );
     const { pagination, ...data } = await inventoryAdminService.listCurrentStock({
       ...parsed.data,
       ...scope,
@@ -66,13 +87,16 @@ router.get(
 
 router.get(
   "/items/detail",
-  requireCheckStockRead,
+  requireStockItemDetailRead,
   asyncHandler(async (req, res) => {
     const parsed = stockItemDetailQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    resolveCheckStockWarehouseScope(req.user!, parsed.data.warehouseId);
+    resolveCheckStockWarehouseScope(req.user!, parsed.data.warehouseId, [
+      Permission.STOCK_VIEW,
+      Permission.STOCK_ACTIONS,
+    ]);
     const { pagination, ...data } = await inventoryAdminService.getStockItemDetail(
       parsed.data
     );
@@ -82,13 +106,17 @@ router.get(
 
 router.get(
   "/movements",
-  requireCheckStockRead,
+  requireMovementsRead,
   asyncHandler(async (req, res) => {
     const parsed = movementsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const scope = resolveCheckStockWarehouseScope(req.user!, parsed.data.warehouseId);
+    const scope = resolveCheckStockWarehouseScope(
+      req.user!,
+      parsed.data.warehouseId,
+      Permission.STOCK_MOVEMENTS
+    );
     const { items, pagination } = await inventoryAdminService.listMovementHistory({
       ...parsed.data,
       ...scope,
@@ -122,13 +150,17 @@ router.get(
 
 router.get(
   "/low-stock",
-  requireCheckStockRead,
+  requireLowStockRead,
   asyncHandler(async (req, res) => {
     const parsed = lowStockQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
     }
-    const scope = resolveCheckStockWarehouseScope(req.user!, parsed.data.warehouseId);
+    const scope = resolveCheckStockWarehouseScope(
+      req.user!,
+      parsed.data.warehouseId,
+      Permission.STOCK_LOW
+    );
     const { pagination, ...data } = await inventoryAdminService.listLowStock({
       ...parsed.data,
       ...scope,

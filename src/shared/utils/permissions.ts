@@ -2,6 +2,9 @@ import { Types } from "mongoose";
 import { UserRole } from "../constants/roles.js";
 import {
   ALL_PERMISSION_CODES,
+  MANAGE_IMPLIES_VIEW,
+  Permission,
+  VIEW_IMPLIED_BY_MANAGE,
   isWarehouseScopedPermission,
   type PermissionCode,
   type PermissionGrant,
@@ -16,6 +19,7 @@ export function isAdmin(user: AuthUser): boolean {
 /**
  * Warehouse-scoped permissions require an explicit warehouseId (fail closed).
  * Use {@link hasPermissionSomewhere} when checking "has this grant at any site".
+ * Manage grants imply their matching View (products/brands/clients/warehouses).
  */
 export function hasPermission(
   user: AuthUser,
@@ -31,7 +35,11 @@ export function hasPermission(
       (g) => g.code === code && g.warehouseId === warehouseId
     );
   }
-  return grants.some((g) => g.code === code);
+  if (grants.some((g) => g.code === code)) return true;
+  const manageThatImplies = VIEW_IMPLIED_BY_MANAGE[code as PermissionCode];
+  return Boolean(
+    manageThatImplies && grants.some((g) => g.code === manageThatImplies)
+  );
 }
 
 /** True if the user holds the permission at any warehouse (or globally). */
@@ -40,7 +48,12 @@ export function hasPermissionSomewhere(
   code: PermissionCode | string
 ): boolean {
   if (isAdmin(user)) return true;
-  return (user.permissions ?? []).some((g) => g.code === code);
+  const grants = user.permissions ?? [];
+  if (grants.some((g) => g.code === code)) return true;
+  const manageThatImplies = VIEW_IMPLIED_BY_MANAGE[code as PermissionCode];
+  return Boolean(
+    manageThatImplies && grants.some((g) => g.code === manageThatImplies)
+  );
 }
 
 export function hasAnyPermission(
@@ -182,32 +195,47 @@ export function normalizePermissionGrants(
   const normalized: PermissionGrant[] = [];
 
   for (const grant of grants) {
-    if (!ALL_PERMISSION_CODES.includes(grant.code as PermissionCode)) {
+    // Legacy returns.warehouse → Transfer History manage at the same warehouse.
+    const code =
+      grant.code === Permission.RETURNS_WAREHOUSE
+        ? Permission.TRANSFERS_MANAGE
+        : grant.code;
+    const warehouseId = grant.warehouseId;
+
+    if (!ALL_PERMISSION_CODES.includes(code as PermissionCode)) {
       throw new BadRequestError(`Unknown permission: ${grant.code}`);
     }
-    if (isWarehouseScopedPermission(grant.code) && !grant.warehouseId) {
+    if (isWarehouseScopedPermission(code) && !warehouseId) {
       throw new BadRequestError(
-        `Permission ${grant.code} requires a warehouse`
+        `Permission ${code} requires a warehouse`
       );
     }
-    if (!isWarehouseScopedPermission(grant.code) && grant.warehouseId) {
+    if (!isWarehouseScopedPermission(code) && warehouseId) {
       throw new BadRequestError(
-        `Permission ${grant.code} cannot be scoped to a warehouse`
+        `Permission ${code} cannot be scoped to a warehouse`
       );
     }
-    if (grant.warehouseId && !Types.ObjectId.isValid(grant.warehouseId)) {
-      throw new BadRequestError(`Invalid warehouse ID for ${grant.code}`);
+    if (warehouseId && !Types.ObjectId.isValid(warehouseId)) {
+      throw new BadRequestError(`Invalid warehouse ID for ${code}`);
     }
 
-    const key = grant.warehouseId
-      ? `${grant.code}:${grant.warehouseId}`
-      : grant.code;
+    const key = warehouseId ? `${code}:${warehouseId}` : code;
     if (seen.has(key)) continue;
     seen.add(key);
     normalized.push({
-      code: grant.code,
-      ...(grant.warehouseId ? { warehouseId: grant.warehouseId } : {}),
+      code: code as PermissionCode,
+      ...(warehouseId ? { warehouseId } : {}),
     });
+  }
+
+  // Manage always stores the matching View grant too.
+  for (const grant of [...normalized]) {
+    const impliedView = MANAGE_IMPLIES_VIEW[grant.code];
+    if (!impliedView || grant.warehouseId) continue;
+    const key = impliedView;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ code: impliedView });
   }
 
   return normalized;

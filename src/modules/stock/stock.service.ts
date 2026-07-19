@@ -29,6 +29,7 @@ import {
 import { Permission } from "../../shared/constants/permissions.js";
 import {
   getWarehouseIdsForPermission,
+  hasPermission,
   isAdmin,
   resolveWarehouseIdForAnyPermission,
 } from "../../shared/utils/permissions.js";
@@ -237,7 +238,7 @@ export async function stockIn(input: StockInInput, user: AuthUser) {
     return runInTransaction(async (session) => {
       const receiveWarehouseId = resolveWarehouseIdForAnyPermission(
         user,
-        [Permission.STOCK_IN, Permission.TRANSFERS_RECEIVE],
+        [Permission.TRANSFERS_RECEIVE],
         input.warehouseId
       );
       return receiveTransfer(input, user, receiveWarehouseId, session);
@@ -347,6 +348,15 @@ async function receiveTransfer(
 
   if (String(transfer.destinationWarehouseId) !== warehouseId) {
     throw new ForbiddenError("This transfer is not for your warehouse");
+  }
+
+  if (
+    !isAdmin(user) &&
+    !hasPermission(user, Permission.TRANSFERS_RECEIVE, warehouseId)
+  ) {
+    throw new ForbiddenError(
+      "You do not have permission to receive transfers at this warehouse"
+    );
   }
 
   if (transfer.status !== TransferStatus.PENDING) {
@@ -501,6 +511,14 @@ export async function stockOut(input: StockOutInput, user: AuthUser) {
     null;
 
   if (input.dispatchType === DispatchType.TRANSFER) {
+    if (
+      !isAdmin(user) &&
+      !hasPermission(user, Permission.TRANSFERS_VIEW, warehouseId)
+    ) {
+      throw new ForbiddenError(
+        "You do not have permission to create transfers from this warehouse"
+      );
+    }
     if (!input.destinationWarehouseId) {
       throw new BadRequestError("Destination warehouse is required");
     }

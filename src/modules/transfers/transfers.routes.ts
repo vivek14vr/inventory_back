@@ -22,7 +22,7 @@ router.get(
   "/pending",
   authenticate,
   requireAnyPermission(
-    [Permission.TRANSFERS_VIEW, Permission.TRANSFERS_RECEIVE, Permission.TRANSFERS_MANAGE],
+    [Permission.TRANSFERS_RECEIVE, Permission.TRANSFERS_MANAGE],
     { warehouseIdFrom: "query", allowScopedWithoutWarehouseId: true }
   ),
   asyncHandler(async (req, res) => {
@@ -53,11 +53,9 @@ router.get(
 router.get(
   "/history",
   authenticate,
-  requireAnyPermission([
-    Permission.TRANSFERS_VIEW,
-    Permission.TRANSFERS_RECEIVE,
-    Permission.TRANSFERS_MANAGE,
-  ], { allowScopedWithoutWarehouseId: true }),
+  requireAnyPermission([Permission.TRANSFERS_MANAGE], {
+    allowScopedWithoutWarehouseId: true,
+  }),
   asyncHandler(async (req, res) => {
     const parsed = transferHistoryQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -74,7 +72,9 @@ router.get(
 router.patch(
   "/:id/status",
   authenticate,
-  requireAdminOrPermission(Permission.TRANSFERS_MANAGE),
+  requireAnyPermission([Permission.TRANSFERS_MANAGE], {
+    allowScopedWithoutWarehouseId: true,
+  }),
   asyncHandler(async (req, res) => {
     const parsed = updateTransferStatusSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -92,7 +92,10 @@ router.patch(
 router.post(
   "/:id/return",
   authenticate,
-  requireAnyPermission([Permission.RETURNS_WAREHOUSE], { allowScopedWithoutWarehouseId: true }),
+  requireAnyPermission(
+    [Permission.TRANSFERS_MANAGE, Permission.RETURNS_WAREHOUSE],
+    { allowScopedWithoutWarehouseId: true }
+  ),
   asyncHandler(async (req, res) => {
     const parsed = returnTransferSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -110,7 +113,10 @@ router.post(
 router.post(
   "/:id/return-in-transit",
   authenticate,
-  requireAnyPermission([Permission.RETURNS_WAREHOUSE], { allowScopedWithoutWarehouseId: true }),
+  requireAnyPermission(
+    [Permission.TRANSFERS_MANAGE, Permission.RETURNS_WAREHOUSE],
+    { allowScopedWithoutWarehouseId: true }
+  ),
   asyncHandler(async (req, res) => {
     const parsed = returnTransferSchema.safeParse(req.body);
     if (!parsed.success) {

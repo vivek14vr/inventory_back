@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { ALL_PERMISSION_CODES } from "../../shared/constants/permissions.js";
+import { ACCEPTED_PERMISSION_CODES } from "../../shared/constants/permissions.js";
 import { UserRole } from "../../shared/constants/roles.js";
 
 const roleEnum = z.enum([UserRole.ADMIN, UserRole.WAREHOUSE_USER]);
 
 const permissionGrantSchema = z.object({
-  code: z.enum(ALL_PERMISSION_CODES as [string, ...string[]]),
+  code: z.enum(ACCEPTED_PERMISSION_CODES as [string, ...string[]]),
   warehouseId: z.string().optional(),
 });
 

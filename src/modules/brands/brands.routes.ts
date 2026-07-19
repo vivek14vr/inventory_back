@@ -23,6 +23,8 @@ router.get(
     Permission.PRODUCTS_VIEW,
     Permission.PRODUCTS_MANAGE,
     Permission.STOCK_VIEW,
+    Permission.STOCK_MOVEMENTS,
+    Permission.STOCK_LOW,
     Permission.STOCK_IN,
     Permission.STOCK_OUT,
     Permission.INVENTORY_VIEW,

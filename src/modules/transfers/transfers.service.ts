@@ -158,7 +158,7 @@ export async function listPendingTransfers(
 ) {
   const filter: Record<string, unknown> = { status: TransferStatus.PENDING };
 
-  if (isAdmin(user) || hasPermission(user, Permission.TRANSFERS_MANAGE)) {
+  if (isAdmin(user)) {
     if (warehouseId && Types.ObjectId.isValid(warehouseId)) {
       filter.$or = [
         { destinationWarehouseId: warehouseId },
@@ -166,36 +166,68 @@ export async function listPendingTransfers(
       ];
     }
   } else {
-    const allowed = [
-      ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_VIEW),
-      ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_RECEIVE),
-      ...getWarehouseIdsForPermission(user, Permission.RETURNS_WAREHOUSE),
-    ];
-    const unique = [...new Set(allowed)];
+    // Receive: destination only. Manage (Transfer History): either side.
+    const receiveIds = getWarehouseIdsForPermission(
+      user,
+      Permission.TRANSFERS_RECEIVE
+    );
+    const manageIds = getWarehouseIdsForPermission(
+      user,
+      Permission.TRANSFERS_MANAGE
+    );
+    const receiveSet = new Set(receiveIds);
+    const manageSet = new Set(manageIds);
 
-    if (unique.length === 0) {
+    if (receiveSet.size === 0 && manageSet.size === 0) {
       throw new ForbiddenError("No warehouse access for transfers");
     }
 
     if (warehouseId) {
-      if (!unique.includes(warehouseId)) {
+      const canReceiveHere = receiveSet.has(warehouseId);
+      const canManageHere = manageSet.has(warehouseId);
+      if (!canReceiveHere && !canManageHere) {
         throw new ForbiddenError("You do not have access to this warehouse");
       }
-      filter.$or = [
-        { destinationWarehouseId: warehouseId },
-        { sourceWarehouseId: warehouseId },
-      ];
-    } else if (unique.length === 1) {
-      const only = unique[0]!;
-      filter.$or = [
-        { destinationWarehouseId: only },
-        { sourceWarehouseId: only },
-      ];
+      if (canManageHere) {
+        filter.$or = [
+          { destinationWarehouseId: new Types.ObjectId(warehouseId) },
+          { sourceWarehouseId: new Types.ObjectId(warehouseId) },
+        ];
+      } else {
+        filter.destinationWarehouseId = new Types.ObjectId(warehouseId);
+      }
     } else {
-      filter.$or = [
-        { destinationWarehouseId: { $in: unique } },
-        { sourceWarehouseId: { $in: unique } },
-      ];
+      const destOnly = [...receiveSet].filter((id) => !manageSet.has(id));
+      const eitherSide = [...manageSet];
+      const clauses: Record<string, unknown>[] = [];
+      if (eitherSide.length === 1) {
+        clauses.push(
+          { destinationWarehouseId: new Types.ObjectId(eitherSide[0]!) },
+          { sourceWarehouseId: new Types.ObjectId(eitherSide[0]!) }
+        );
+      } else if (eitherSide.length > 1) {
+        const oids = eitherSide.map((id) => new Types.ObjectId(id));
+        clauses.push(
+          { destinationWarehouseId: { $in: oids } },
+          { sourceWarehouseId: { $in: oids } }
+        );
+      }
+      if (destOnly.length === 1) {
+        clauses.push({
+          destinationWarehouseId: new Types.ObjectId(destOnly[0]!),
+        });
+      } else if (destOnly.length > 1) {
+        clauses.push({
+          destinationWarehouseId: {
+            $in: destOnly.map((id) => new Types.ObjectId(id)),
+          },
+        });
+      }
+      if (clauses.length === 1) {
+        Object.assign(filter, clauses[0]);
+      } else if (clauses.length > 1) {
+        filter.$or = clauses;
+      }
     }
   }
 
@@ -355,33 +387,44 @@ export async function listTransferHistory(
     }
   }
 
-  // Warehouse scoping: non-admins without global transfers.manage only see
-  // transfers touching a warehouse they have transfer access to.
-  if (!isAdmin(user) && !hasPermission(user, Permission.TRANSFERS_MANAGE)) {
+  // Staff Transfer History: only transfers SENT FROM managed warehouses
+  // (Goregaon manage → Goregaon→Vasai, not Vasai→Goregaon).
+  if (!isAdmin(user)) {
     const allowed = [
-      ...new Set([
-        ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_VIEW),
-        ...getWarehouseIdsForPermission(user, Permission.TRANSFERS_RECEIVE),
-      ]),
-    ];
+      ...new Set(getWarehouseIdsForPermission(user, Permission.TRANSFERS_MANAGE)),
+    ].filter((id) => Types.ObjectId.isValid(id));
 
     if (allowed.length === 0) {
-      throw new ForbiddenError("No warehouse access for transfers");
+      throw new ForbiddenError("No warehouse access for transfer history");
     }
 
-    const scope = {
-      $or: [
-        { sourceWarehouseId: { $in: allowed } },
-        { destinationWarehouseId: { $in: allowed } },
-      ],
-    };
+    const allowedOids = allowed.map((id) => new Types.ObjectId(id));
+    const allowedSet = new Set(allowed);
 
-    if (filter.$or) {
-      filter.$and = [{ $or: filter.$or }, scope];
-      delete filter.$or;
+    if (filter.sourceWarehouseId) {
+      const requested = String(filter.sourceWarehouseId);
+      if (!allowedSet.has(requested)) {
+        throw new ForbiddenError("You do not have access to this warehouse");
+      }
+      filter.sourceWarehouseId = new Types.ObjectId(requested);
     } else {
-      Object.assign(filter, scope);
+      filter.sourceWarehouseId = { $in: allowedOids };
     }
+  }
+
+  if (
+    typeof filter.sourceWarehouseId === "string" &&
+    Types.ObjectId.isValid(filter.sourceWarehouseId)
+  ) {
+    filter.sourceWarehouseId = new Types.ObjectId(filter.sourceWarehouseId);
+  }
+  if (
+    typeof filter.destinationWarehouseId === "string" &&
+    Types.ObjectId.isValid(filter.destinationWarehouseId)
+  ) {
+    filter.destinationWarehouseId = new Types.ObjectId(
+      filter.destinationWarehouseId
+    );
   }
 
   const { page, limit, skip } = getPaginationParams(query);
@@ -436,9 +479,24 @@ export async function updateTransferStatus(
     throw new BadRequestError("Invalid transfer ID");
   }
 
-  const transferExists = await Transfer.exists({ _id: transferId });
-  if (!transferExists) {
+  const existing = await Transfer.findById(transferId)
+    .select("sourceWarehouseId destinationWarehouseId")
+    .lean();
+  if (!existing) {
     throw new NotFoundError("Transfer not found");
+  }
+
+  if (!isAdmin(user)) {
+    const sourceId = String(existing.sourceWarehouseId);
+    const destId = String(existing.destinationWarehouseId);
+    if (
+      !hasPermission(user, Permission.TRANSFERS_MANAGE, sourceId) &&
+      !hasPermission(user, Permission.TRANSFERS_MANAGE, destId)
+    ) {
+      throw new ForbiddenError(
+        "You do not have permission to manage this transfer"
+      );
+    }
   }
 
   return runInTransaction(async (session) => {
@@ -607,7 +665,11 @@ export async function updateTransferStatus(
 
 function canWarehouseReturnAt(user: AuthUser, warehouseId: string): boolean {
   if (isAdmin(user)) return true;
-  return hasPermission(user, Permission.RETURNS_WAREHOUSE, warehouseId);
+  // Full Transfer History manage includes return actions; legacy returns.warehouse still honored.
+  return (
+    hasPermission(user, Permission.TRANSFERS_MANAGE, warehouseId) ||
+    hasPermission(user, Permission.RETURNS_WAREHOUSE, warehouseId)
+  );
 }
 
 function assertCanReturnTransfer(user: AuthUser, transfer: {

@@ -29,7 +29,20 @@ export const movementsQuerySchema = paginationQuerySchema.extend({
   warehouseId: z.string().optional(),
   brandId: z.string().optional(),
   productId: z.string().optional(),
+  /** Legacy direction filter (STOCK_IN / STOCK_OUT). Prefer `kind` for UI filters. */
   type: z.enum(["STOCK_IN", "STOCK_OUT"]).optional(),
+  kind: z
+    .enum([
+      "stock_in",
+      "stock_out",
+      "sale",
+      "transfer_in",
+      "transfer_out",
+      "return",
+      "adjustment",
+      "invoice_edit",
+    ])
+    .optional(),
   dateFrom: z.string().optional(),
   dateTo: z.string().optional(),
   sortBy: z.enum(["createdAt", "quantity", "type"]).optional().default("createdAt"),
