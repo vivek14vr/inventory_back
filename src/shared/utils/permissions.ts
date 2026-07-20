@@ -20,6 +20,7 @@ export function isAdmin(user: AuthUser): boolean {
  * Warehouse-scoped permissions require an explicit warehouseId (fail closed).
  * Use {@link hasPermissionSomewhere} when checking "has this grant at any site".
  * Manage grants imply their matching View (products/brands/clients/warehouses).
+ * Legacy imports.manage unlocks the split import permissions.
  */
 export function hasPermission(
   user: AuthUser,
@@ -29,13 +30,35 @@ export function hasPermission(
   if (isAdmin(user)) return true;
 
   const grants = user.permissions ?? [];
+  const hasLegacyImportsManage = grants.some(
+    (g) => g.code === Permission.IMPORTS_MANAGE && !g.warehouseId
+  );
+
   if (isWarehouseScopedPermission(code)) {
     if (!warehouseId) return false;
+    if (
+      code === Permission.IMPORTS_SALES &&
+      (hasLegacyImportsManage ||
+        grants.some(
+          (g) =>
+            g.code === Permission.IMPORTS_MANAGE &&
+            g.warehouseId === warehouseId
+        ))
+    ) {
+      return true;
+    }
     return grants.some(
       (g) => g.code === code && g.warehouseId === warehouseId
     );
   }
   if (grants.some((g) => g.code === code)) return true;
+  if (
+    hasLegacyImportsManage &&
+    (code === Permission.IMPORTS_PRODUCTS ||
+      code === Permission.IMPORTS_CLIENTS)
+  ) {
+    return true;
+  }
   const manageThatImplies = VIEW_IMPLIED_BY_MANAGE[code as PermissionCode];
   return Boolean(
     manageThatImplies && grants.some((g) => g.code === manageThatImplies)
@@ -50,6 +73,14 @@ export function hasPermissionSomewhere(
   if (isAdmin(user)) return true;
   const grants = user.permissions ?? [];
   if (grants.some((g) => g.code === code)) return true;
+  if (
+    grants.some((g) => g.code === Permission.IMPORTS_MANAGE) &&
+    (code === Permission.IMPORTS_PRODUCTS ||
+      code === Permission.IMPORTS_CLIENTS ||
+      code === Permission.IMPORTS_SALES)
+  ) {
+    return true;
+  }
   const manageThatImplies = VIEW_IMPLIED_BY_MANAGE[code as PermissionCode];
   return Boolean(
     manageThatImplies && grants.some((g) => g.code === manageThatImplies)
@@ -194,21 +225,12 @@ export function normalizePermissionGrants(
   const seen = new Set<string>();
   const normalized: PermissionGrant[] = [];
 
-  for (const grant of grants) {
-    // Legacy returns.warehouse → Transfer History manage at the same warehouse.
-    const code =
-      grant.code === Permission.RETURNS_WAREHOUSE
-        ? Permission.TRANSFERS_MANAGE
-        : grant.code;
-    const warehouseId = grant.warehouseId;
-
-    if (!ALL_PERMISSION_CODES.includes(code as PermissionCode)) {
-      throw new BadRequestError(`Unknown permission: ${grant.code}`);
+  function pushGrant(code: PermissionCode, warehouseId?: string) {
+    if (!ALL_PERMISSION_CODES.includes(code)) {
+      throw new BadRequestError(`Unknown permission: ${code}`);
     }
     if (isWarehouseScopedPermission(code) && !warehouseId) {
-      throw new BadRequestError(
-        `Permission ${code} requires a warehouse`
-      );
+      throw new BadRequestError(`Permission ${code} requires a warehouse`);
     }
     if (!isWarehouseScopedPermission(code) && warehouseId) {
       throw new BadRequestError(
@@ -220,22 +242,38 @@ export function normalizePermissionGrants(
     }
 
     const key = warehouseId ? `${code}:${warehouseId}` : code;
-    if (seen.has(key)) continue;
+    if (seen.has(key)) return;
     seen.add(key);
     normalized.push({
-      code: code as PermissionCode,
+      code,
       ...(warehouseId ? { warehouseId } : {}),
     });
+  }
+
+  for (const grant of grants) {
+    // Legacy returns.warehouse → Transfer History manage at the same warehouse.
+    if (grant.code === Permission.RETURNS_WAREHOUSE) {
+      pushGrant(Permission.TRANSFERS_MANAGE, grant.warehouseId);
+      continue;
+    }
+    // Legacy imports.manage → products + clients (+ sales if scoped).
+    if (grant.code === Permission.IMPORTS_MANAGE) {
+      pushGrant(Permission.IMPORTS_PRODUCTS);
+      pushGrant(Permission.IMPORTS_CLIENTS);
+      if (grant.warehouseId) {
+        pushGrant(Permission.IMPORTS_SALES, grant.warehouseId);
+      }
+      continue;
+    }
+
+    pushGrant(grant.code as PermissionCode, grant.warehouseId);
   }
 
   // Manage always stores the matching View grant too.
   for (const grant of [...normalized]) {
     const impliedView = MANAGE_IMPLIES_VIEW[grant.code];
     if (!impliedView || grant.warehouseId) continue;
-    const key = impliedView;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    normalized.push({ code: impliedView });
+    pushGrant(impliedView);
   }
 
   return normalized;

@@ -35,6 +35,8 @@ router.get(
     Permission.INVENTORY_ADJUST,
     Permission.INVENTORY_DASHBOARD,
     Permission.IMPORTS_MANAGE,
+    Permission.IMPORTS_PRODUCTS,
+    Permission.IMPORTS_SALES,
     Permission.REPORTS_VIEW,
   ], { allowScopedWithoutWarehouseId: true }),
   asyncHandler(async (req, res) => {

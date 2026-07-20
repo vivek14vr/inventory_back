@@ -6,6 +6,7 @@ import { StockMovement } from "../../models/StockMovement.js";
 import { TallyImport, type ITallyImportRow } from "../../models/TallyImport.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { AuditLog } from "../../models/AuditLog.js";
+import { Permission } from "../../shared/constants/permissions.js";
 import { StockMovementType } from "../../shared/constants/roles.js";
 import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import {
@@ -18,6 +19,7 @@ import {
   indexProductsByBrandAndLabel,
   productBrandKey,
 } from "../../shared/utils/productLookup.js";
+import { assertPermission } from "../../shared/utils/permissions.js";
 import * as inventoryService from "../stock/inventory.service.js";
 
 type ParsedRow = {
@@ -103,6 +105,8 @@ export async function processTallyImport(
   if (!Types.ObjectId.isValid(warehouseId)) {
     throw new BadRequestError("Invalid warehouse ID");
   }
+
+  assertPermission(user, Permission.IMPORTS_SALES, warehouseId);
 
   const warehouse = await Warehouse.findOne({ _id: warehouseId, isActive: true });
   if (!warehouse) {

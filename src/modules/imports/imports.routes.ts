@@ -3,7 +3,11 @@ import multer from "multer";
 import { Permission } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
-import { requireAdminOrPermission } from "../../shared/middleware/requirePermission.js";
+import {
+  requireAdminOrPermission,
+  requireAnyPermission,
+  requirePermission,
+} from "../../shared/middleware/requirePermission.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as importsService from "./imports.service.js";
@@ -41,10 +45,19 @@ const upload = multer({
 
 const router = Router();
 
-router.use(authenticate, requireAdminOrPermission(Permission.IMPORTS_MANAGE));
+router.use(authenticate);
+
+const anyImportPermission = [
+  Permission.IMPORTS_PRODUCTS,
+  Permission.IMPORTS_CLIENTS,
+  Permission.IMPORTS_SALES,
+] as const;
 
 router.get(
   "/",
+  requireAnyPermission([...anyImportPermission], {
+    allowScopedWithoutWarehouseId: true,
+  }),
   asyncHandler(async (_req, res) => {
     const imports = await importsService.listImports();
     sendSuccess(res, imports);
@@ -53,6 +66,7 @@ router.get(
 
 router.post(
   "/products/preview",
+  requireAdminOrPermission(Permission.IMPORTS_PRODUCTS),
   upload.single("file"),
   asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -66,6 +80,7 @@ router.post(
 
 router.post(
   "/products/confirm",
+  requireAdminOrPermission(Permission.IMPORTS_PRODUCTS),
   asyncHandler(async (req, res) => {
     const input = productImportConfirmSchema.parse(req.body);
     const result = await productImportService.confirmProductImport(input, req.user!);
@@ -75,6 +90,7 @@ router.post(
 
 router.post(
   "/clients/preview",
+  requireAdminOrPermission(Permission.IMPORTS_CLIENTS),
   upload.single("file"),
   asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -88,6 +104,7 @@ router.post(
 
 router.post(
   "/clients/confirm",
+  requireAdminOrPermission(Permission.IMPORTS_CLIENTS),
   asyncHandler(async (req, res) => {
     const input = clientImportConfirmSchema.parse(req.body);
     const result = await clientImportService.confirmClientImport(input, req.user!);
@@ -97,6 +114,9 @@ router.post(
 
 router.post(
   "/sales/preview",
+  requirePermission(Permission.IMPORTS_SALES, {
+    allowScopedWithoutWarehouseId: true,
+  }),
   upload.single("file"),
   asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -110,6 +130,9 @@ router.post(
 
 router.post(
   "/sales/confirm",
+  requirePermission(Permission.IMPORTS_SALES, {
+    warehouseIdFrom: "body",
+  }),
   asyncHandler(async (req, res) => {
     const input = salesImportConfirmSchema.parse(req.body);
     const result = await salesImportService.confirmSalesImport(input, req.user!);
@@ -119,6 +142,9 @@ router.post(
 
 router.post(
   "/tally",
+  requirePermission(Permission.IMPORTS_SALES, {
+    warehouseIdFrom: "body",
+  }),
   upload.single("file"),
   asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -143,6 +169,9 @@ router.post(
 
 router.get(
   "/:id",
+  requireAnyPermission([...anyImportPermission], {
+    allowScopedWithoutWarehouseId: true,
+  }),
   asyncHandler(async (req, res) => {
     const doc = await importsService.getImportById(String(req.params.id));
     sendSuccess(res, doc);

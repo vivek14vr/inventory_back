@@ -387,8 +387,8 @@ export async function listTransferHistory(
     }
   }
 
-  // Staff Transfer History: only transfers SENT FROM managed warehouses
-  // (Goregaon manage → Goregaon→Vasai, not Vasai→Goregaon).
+  // Staff Transfer History: only transfers arriving AT managed warehouses
+  // (Goregaon manage → Vasai→Goregaon receive, not Goregaon→Vasai outbound).
   if (!isAdmin(user)) {
     const allowed = [
       ...new Set(getWarehouseIdsForPermission(user, Permission.TRANSFERS_MANAGE)),
@@ -401,14 +401,14 @@ export async function listTransferHistory(
     const allowedOids = allowed.map((id) => new Types.ObjectId(id));
     const allowedSet = new Set(allowed);
 
-    if (filter.sourceWarehouseId) {
-      const requested = String(filter.sourceWarehouseId);
+    if (filter.destinationWarehouseId) {
+      const requested = String(filter.destinationWarehouseId);
       if (!allowedSet.has(requested)) {
         throw new ForbiddenError("You do not have access to this warehouse");
       }
-      filter.sourceWarehouseId = new Types.ObjectId(requested);
+      filter.destinationWarehouseId = new Types.ObjectId(requested);
     } else {
-      filter.sourceWarehouseId = { $in: allowedOids };
+      filter.destinationWarehouseId = { $in: allowedOids };
     }
   }
 
@@ -489,7 +489,26 @@ export async function updateTransferStatus(
   if (!isAdmin(user)) {
     const sourceId = String(existing.sourceWarehouseId);
     const destId = String(existing.destinationWarehouseId);
-    if (
+    if (input.status === TransferStatus.RECEIVED) {
+      const canReceive =
+        hasPermission(user, Permission.TRANSFERS_MANAGE, destId) ||
+        hasPermission(user, Permission.TRANSFERS_RECEIVE, destId);
+      if (!canReceive) {
+        throw new ForbiddenError(
+          "You do not have permission to receive this transfer at the destination warehouse"
+        );
+      }
+    } else if (input.status === TransferStatus.CANCELLED) {
+      // Sender recalls outbound, or destination rejects inbound.
+      const canCancel =
+        hasPermission(user, Permission.TRANSFERS_MANAGE, sourceId) ||
+        hasPermission(user, Permission.TRANSFERS_MANAGE, destId);
+      if (!canCancel) {
+        throw new ForbiddenError(
+          "You do not have permission to cancel this transfer"
+        );
+      }
+    } else if (
       !hasPermission(user, Permission.TRANSFERS_MANAGE, sourceId) &&
       !hasPermission(user, Permission.TRANSFERS_MANAGE, destId)
     ) {

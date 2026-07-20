@@ -13,6 +13,8 @@ import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js"
 import type { AuthUser } from "../../shared/types/auth.js";
 import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
 import { normalizeProductName } from "../../shared/utils/productName.js";
+import { assertPermission } from "../../shared/utils/permissions.js";
+import { Permission } from "../../shared/constants/permissions.js";
 import { createBrand } from "../brands/brands.service.js";
 import { createClient } from "../clients/clients.service.js";
 import { createProduct } from "../products/products.service.js";
@@ -897,6 +899,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
   if (!Types.ObjectId.isValid(warehouseId)) {
     throw new BadRequestError("Invalid warehouse ID");
   }
+
+  assertPermission(user, Permission.IMPORTS_SALES, warehouseId);
 
   const warehouse = await Warehouse.findOne({ _id: warehouseId, isActive: true }).lean();
   if (!warehouse) {

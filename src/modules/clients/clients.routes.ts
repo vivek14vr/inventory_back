@@ -21,6 +21,9 @@ router.get(
     [
       Permission.CLIENTS_VIEW,
       Permission.CLIENTS_MANAGE,
+      Permission.IMPORTS_MANAGE,
+      Permission.IMPORTS_CLIENTS,
+      Permission.IMPORTS_SALES,
       Permission.STOCK_OUT,
       Permission.RETURNS_CLIENT,
       Permission.INVENTORY_VIEW,

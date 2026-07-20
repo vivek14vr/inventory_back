@@ -37,7 +37,12 @@ export const Permission = {
 
   REPORTS_VIEW: "reports.view",
 
+  /** @deprecated Prefer imports.products / imports.clients / imports.sales */
   IMPORTS_MANAGE: "imports.manage",
+  IMPORTS_PRODUCTS: "imports.products",
+  IMPORTS_CLIENTS: "imports.clients",
+  /** Warehouse-scoped: direct-sell / stock-out Excel import */
+  IMPORTS_SALES: "imports.sales",
 
   USERS_MANAGE: "users.manage",
 
@@ -159,7 +164,7 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     id: "transfer-history",
     label: "Transfer History",
     description:
-      "Grant per warehouse. Shows Transfer History for transfers sent from that warehouse (not inbound from elsewhere).",
+      "Grant per warehouse. Shows inbound transfers to that warehouse so staff can receive, return, or reject them.",
     warehouseScoped: true,
     navGroup: "more",
     permissions: [
@@ -167,8 +172,8 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
         code: Permission.TRANSFERS_MANAGE,
         label: "Manage transfer history",
         description:
-          "View/manage transfers sent from this warehouse (receive actions, returns, cancel/update on those rows).",
-        example: "Goregaon manage shows Goregaon → Vasai, not Vasai → Goregaon.",
+          "View/manage transfers arriving at this warehouse (receive, return, cancel/reject inbound).",
+        example: "Goregaon manage shows Vasai → Goregaon, not Goregaon → Vasai.",
       },
     ],
   },
@@ -268,17 +273,33 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     id: "imports",
     label: "Imports",
     description:
-      "Bulk import product catalog, Tally sales register (direct sell), and legacy tally deductions.",
+      "Excel uploads. Product catalog and clients are company-wide; direct sell / stock out is per warehouse.",
     warehouseScoped: false,
     navGroup: "more",
     permissions: [
       {
-        code: Permission.IMPORTS_MANAGE,
-        label: "Manage imports",
+        code: Permission.IMPORTS_PRODUCTS,
+        label: "Import product catalog",
         description:
-          "Upload product catalog Excel, sales register Excel, and legacy tally deduction files.",
-        example:
-          "Import a product catalog spreadsheet or backfill Tally sales as stock-out.",
+          "Upload product Excel (names, units, low-stock alerts). Same for all warehouses.",
+        example: "Import a catalog spreadsheet that lists every SKU once for the company.",
+        warehouseScoped: false,
+      },
+      {
+        code: Permission.IMPORTS_CLIENTS,
+        label: "Import clients",
+        description:
+          "Upload client Excel (primary/secondary names). Same for all warehouses.",
+        example: "Import a client list used for direct sell and returns.",
+        warehouseScoped: false,
+      },
+      {
+        code: Permission.IMPORTS_SALES,
+        label: "Import direct sell / stock out",
+        description:
+          "Upload Tally-style sales register and stock out from a specific warehouse.",
+        example: "Import Goregaon sales for today and deduct Goregaon stock only.",
+        warehouseScoped: true,
       },
     ],
   },
@@ -446,6 +467,7 @@ export const ALL_PERMISSION_CODES: PermissionCode[] = PERMISSION_MODULES.flatMap
  */
 export const LEGACY_PERMISSION_CODES: readonly PermissionCode[] = [
   Permission.RETURNS_WAREHOUSE,
+  Permission.IMPORTS_MANAGE,
 ];
 
 /** Zod / write-path: current + legacy codes (legacy migrated in normalize). */
@@ -474,12 +496,12 @@ export const STOCK_BALANCE_READ_PERMISSIONS: PermissionCode[] = [
 /**
  * Company-wide / admin-power permissions that must not be granted to warehouse staff.
  * Admins ignore grants entirely (full access by role).
+ * Imports is assignable to trusted staff (company-wide Excel uploads).
  */
 export const ADMIN_ONLY_PERMISSIONS: readonly PermissionCode[] = [
   Permission.INVENTORY_VIEW,
   Permission.INVENTORY_ADJUST,
   Permission.INVENTORY_DASHBOARD,
-  Permission.IMPORTS_MANAGE,
   Permission.AUDIT_VIEW,
   Permission.USERS_MANAGE,
 ];
