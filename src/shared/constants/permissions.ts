@@ -164,7 +164,7 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
     id: "transfer-history",
     label: "Transfer History",
     description:
-      "Grant per warehouse. Shows inbound transfers to that warehouse so staff can receive, return, or reject them.",
+      "Grant per warehouse. Staff can browse all transfers; Receive, Return, and Cancel only apply at warehouses they are granted.",
     warehouseScoped: true,
     navGroup: "more",
     permissions: [
@@ -172,8 +172,9 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
         code: Permission.TRANSFERS_MANAGE,
         label: "Manage transfer history",
         description:
-          "View/manage transfers arriving at this warehouse (receive, return, cancel/reject inbound).",
-        example: "Goregaon manage shows Vasai → Goregaon, not Goregaon → Vasai.",
+          "Open Transfer History (full list). Act on inbound stock at granted warehouses (receive, return, cancel/reject).",
+        example:
+          "Goregaon manage sees every route, but Receive/Return only when destination is Goregaon.",
       },
     ],
   },

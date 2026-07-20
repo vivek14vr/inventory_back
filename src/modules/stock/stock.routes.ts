@@ -78,9 +78,16 @@ router.get(
 
 router.post(
   "/in",
-  requireAnyPermission([Permission.STOCK_IN, Permission.TRANSFERS_RECEIVE], {
-    warehouseIdFrom: "body",
-  }),
+  requireAnyPermission(
+    [
+      Permission.STOCK_IN,
+      Permission.TRANSFERS_RECEIVE,
+      Permission.TRANSFERS_MANAGE,
+    ],
+    {
+      warehouseIdFrom: "body",
+    }
+  ),
   asyncHandler(async (req, res) => {
     const parsed = stockInSchema.safeParse(req.body);
     if (!parsed.success) {

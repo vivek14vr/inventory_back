@@ -166,68 +166,30 @@ export async function listPendingTransfers(
       ];
     }
   } else {
-    // Receive: destination only. Manage (Transfer History): either side.
-    const receiveIds = getWarehouseIdsForPermission(
+    // Receive Incoming (Send Stock): only transfers.receive at the destination.
+    // transfers.manage is Transfer History and must not unlock this list.
+    const destIds = getWarehouseIdsForPermission(
       user,
       Permission.TRANSFERS_RECEIVE
-    );
-    const manageIds = getWarehouseIdsForPermission(
-      user,
-      Permission.TRANSFERS_MANAGE
-    );
-    const receiveSet = new Set(receiveIds);
-    const manageSet = new Set(manageIds);
+    ).filter((id) => Types.ObjectId.isValid(id));
 
-    if (receiveSet.size === 0 && manageSet.size === 0) {
-      throw new ForbiddenError("No warehouse access for transfers");
+    if (destIds.length === 0) {
+      throw new ForbiddenError("No warehouse access to receive transfers");
     }
 
+    const destSet = new Set(destIds);
+
     if (warehouseId) {
-      const canReceiveHere = receiveSet.has(warehouseId);
-      const canManageHere = manageSet.has(warehouseId);
-      if (!canReceiveHere && !canManageHere) {
+      if (!destSet.has(warehouseId)) {
         throw new ForbiddenError("You do not have access to this warehouse");
       }
-      if (canManageHere) {
-        filter.$or = [
-          { destinationWarehouseId: new Types.ObjectId(warehouseId) },
-          { sourceWarehouseId: new Types.ObjectId(warehouseId) },
-        ];
-      } else {
-        filter.destinationWarehouseId = new Types.ObjectId(warehouseId);
-      }
+      filter.destinationWarehouseId = new Types.ObjectId(warehouseId);
+    } else if (destIds.length === 1) {
+      filter.destinationWarehouseId = new Types.ObjectId(destIds[0]!);
     } else {
-      const destOnly = [...receiveSet].filter((id) => !manageSet.has(id));
-      const eitherSide = [...manageSet];
-      const clauses: Record<string, unknown>[] = [];
-      if (eitherSide.length === 1) {
-        clauses.push(
-          { destinationWarehouseId: new Types.ObjectId(eitherSide[0]!) },
-          { sourceWarehouseId: new Types.ObjectId(eitherSide[0]!) }
-        );
-      } else if (eitherSide.length > 1) {
-        const oids = eitherSide.map((id) => new Types.ObjectId(id));
-        clauses.push(
-          { destinationWarehouseId: { $in: oids } },
-          { sourceWarehouseId: { $in: oids } }
-        );
-      }
-      if (destOnly.length === 1) {
-        clauses.push({
-          destinationWarehouseId: new Types.ObjectId(destOnly[0]!),
-        });
-      } else if (destOnly.length > 1) {
-        clauses.push({
-          destinationWarehouseId: {
-            $in: destOnly.map((id) => new Types.ObjectId(id)),
-          },
-        });
-      }
-      if (clauses.length === 1) {
-        Object.assign(filter, clauses[0]);
-      } else if (clauses.length > 1) {
-        filter.$or = clauses;
-      }
+      filter.destinationWarehouseId = {
+        $in: destIds.map((id) => new Types.ObjectId(id)),
+      };
     }
   }
 
@@ -387,8 +349,8 @@ export async function listTransferHistory(
     }
   }
 
-  // Staff Transfer History: only transfers arriving AT managed warehouses
-  // (Goregaon manage → Vasai→Goregaon receive, not Goregaon→Vasai outbound).
+  // Staff with Transfer History manage anywhere may browse the full list.
+  // Receive / return / cancel are enforced per warehouse on action endpoints.
   if (!isAdmin(user)) {
     const allowed = [
       ...new Set(getWarehouseIdsForPermission(user, Permission.TRANSFERS_MANAGE)),
@@ -396,19 +358,6 @@ export async function listTransferHistory(
 
     if (allowed.length === 0) {
       throw new ForbiddenError("No warehouse access for transfer history");
-    }
-
-    const allowedOids = allowed.map((id) => new Types.ObjectId(id));
-    const allowedSet = new Set(allowed);
-
-    if (filter.destinationWarehouseId) {
-      const requested = String(filter.destinationWarehouseId);
-      if (!allowedSet.has(requested)) {
-        throw new ForbiddenError("You do not have access to this warehouse");
-      }
-      filter.destinationWarehouseId = new Types.ObjectId(requested);
-    } else {
-      filter.destinationWarehouseId = { $in: allowedOids };
     }
   }
 

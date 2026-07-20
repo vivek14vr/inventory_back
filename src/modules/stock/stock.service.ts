@@ -238,7 +238,7 @@ export async function stockIn(input: StockInInput, user: AuthUser) {
     return runInTransaction(async (session) => {
       const receiveWarehouseId = resolveWarehouseIdForAnyPermission(
         user,
-        [Permission.TRANSFERS_RECEIVE],
+        [Permission.TRANSFERS_RECEIVE, Permission.TRANSFERS_MANAGE],
         input.warehouseId
       );
       return receiveTransfer(input, user, receiveWarehouseId, session);
@@ -352,7 +352,8 @@ async function receiveTransfer(
 
   if (
     !isAdmin(user) &&
-    !hasPermission(user, Permission.TRANSFERS_RECEIVE, warehouseId)
+    !hasPermission(user, Permission.TRANSFERS_RECEIVE, warehouseId) &&
+    !hasPermission(user, Permission.TRANSFERS_MANAGE, warehouseId)
   ) {
     throw new ForbiddenError(
       "You do not have permission to receive transfers at this warehouse"

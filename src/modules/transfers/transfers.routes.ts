@@ -21,10 +21,10 @@ const router = Router();
 router.get(
   "/pending",
   authenticate,
-  requireAnyPermission(
-    [Permission.TRANSFERS_RECEIVE, Permission.TRANSFERS_MANAGE],
-    { warehouseIdFrom: "query", allowScopedWithoutWarehouseId: true }
-  ),
+  requireAnyPermission([Permission.TRANSFERS_RECEIVE], {
+    warehouseIdFrom: "query",
+    allowScopedWithoutWarehouseId: true,
+  }),
   asyncHandler(async (req, res) => {
     const warehouseId =
       typeof req.query.warehouseId === "string" ? req.query.warehouseId : undefined;
