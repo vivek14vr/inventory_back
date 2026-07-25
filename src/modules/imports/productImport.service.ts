@@ -41,6 +41,8 @@ export type ParsedProductImportRow = {
   totalLowStockThreshold?: number;
   warehouseLowStockThresholds?: WarehouseLowStockImportEntry[];
   stockUnit: string;
+  /** Parse-time field errors (invalid numbers, etc.) merged into preview/confirm validation. */
+  parseErrors?: string[];
 };
 
 export type ProductImportPreviewRow = ParsedProductImportRow & {
@@ -101,12 +103,41 @@ function findColumnKey(keys: string[], aliases: string[]): string | undefined {
   return keys.find((key) => aliases.includes(normalizeHeader(key)));
 }
 
-function parseNumericCell(raw: string): number | undefined {
+/** Empty → undefined. Non-empty invalid → push error and return undefined. */
+function parseOptionalNonNegative(
+  raw: string,
+  label: string,
+  errors: string[]
+): number | undefined {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
   const value = Number(trimmed);
-  if (!Number.isFinite(value) || value < 0) return undefined;
+  if (!Number.isFinite(value) || value < 0) {
+    errors.push(`${label} must be a non-negative number`);
+    return undefined;
+  }
   return value;
+}
+
+function parseUnitsPerCarton(
+  raw: string,
+  errors: string[]
+): number {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    errors.push("Units in a carton is required");
+    return Number.NaN;
+  }
+  const value = Number(trimmed);
+  if (!Number.isFinite(value) || value < 1) {
+    errors.push("Units in a carton must be at least 1");
+    return Number.NaN;
+  }
+  return Math.round(value);
+}
+
+function productImportDedupeKey(brandName: string, primaryName: string): string {
+  return `${brandName.trim().toLowerCase()}::${normalizeProductName(primaryName)}`;
 }
 
 function resolveLowStockValue(
@@ -166,7 +197,8 @@ function detectWarehouseLowStockColumns(keys: string[]): WarehouseLowStockColumn
 function parseWarehouseLowStockThresholds(
   row: Record<string, unknown>,
   groups: WarehouseLowStockColumnGroup[],
-  unitsPerStockUnit: number
+  unitsPerStockUnit: number,
+  errors: string[]
 ): WarehouseLowStockImportEntry[] {
   const entries: WarehouseLowStockImportEntry[] = [];
 
@@ -175,11 +207,27 @@ function parseWarehouseLowStockThresholds(
     const packRaw = group.packKey ? String(row[group.packKey] ?? "").trim() : "";
     if (!unitRaw && !packRaw) continue;
 
-    const threshold = resolveLowStockValue(
-      parseNumericCell(unitRaw),
-      parseNumericCell(packRaw),
-      unitsPerStockUnit
-    );
+    const label = group.warehouseLabel;
+    let threshold: number | undefined;
+
+    if (unitRaw) {
+      const unitQty = parseOptionalNonNegative(
+        unitRaw,
+        `Low quantity unit in ${label}`,
+        errors
+      );
+      if (unitQty == null) continue;
+      threshold = resolveLowStockValue(unitQty, undefined, unitsPerStockUnit);
+    } else {
+      const packQty = parseOptionalNonNegative(
+        packRaw,
+        `Low quantity carton in ${label}`,
+        errors
+      );
+      if (packQty == null) continue;
+      threshold = resolveLowStockValue(undefined, packQty, unitsPerStockUnit);
+    }
+
     if (threshold == null) continue;
 
     entries.push({
@@ -329,30 +377,44 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       return;
     }
 
-    const baseUnit = rawUnit || "piece";
-    const unitsPerStockUnit = Number(rawUnitsPerPack);
-    const per =
-      Number.isFinite(unitsPerStockUnit) && unitsPerStockUnit > 0
-        ? Math.round(unitsPerStockUnit)
-        : 1;
+    const parseErrors: string[] = [];
+    const baseUnit = rawUnit;
+    const per = parseUnitsPerCarton(rawUnitsPerPack, parseErrors);
+    const totalLowUnit = parseOptionalNonNegative(
+      rawTotalLowUnit,
+      "Total low quantity unit",
+      parseErrors
+    );
+    const totalLowPack = parseOptionalNonNegative(
+      rawTotalLowPack,
+      "Total low quantity carton",
+      parseErrors
+    );
+    const legacyTotalLowUnit = parseOptionalNonNegative(
+      rawLegacyTotalLowUnit,
+      "Low quantity unit",
+      parseErrors
+    );
+    const legacyTotalLowPack = parseOptionalNonNegative(
+      rawLegacyTotalLowPack,
+      "Low quantity carton",
+      parseErrors
+    );
     const totalLowStockThreshold =
+      resolveLowStockValue(totalLowUnit, totalLowPack, Number.isFinite(per) ? per : 1) ??
       resolveLowStockValue(
-        parseNumericCell(rawTotalLowUnit),
-        parseNumericCell(rawTotalLowPack),
-        per
-      ) ??
-      resolveLowStockValue(
-        parseNumericCell(rawLegacyTotalLowUnit),
-        parseNumericCell(rawLegacyTotalLowPack),
-        per
+        legacyTotalLowUnit,
+        legacyTotalLowPack,
+        Number.isFinite(per) ? per : 1
       );
     const warehouseLowStockThresholds = parseWarehouseLowStockThresholds(
       row,
       warehouseLowStockGroups,
-      per
+      Number.isFinite(per) ? per : 1,
+      parseErrors
     );
 
-    const stockUnit = per > 1 ? "carton" : baseUnit;
+    const stockUnit = Number.isFinite(per) && per > 1 ? "carton" : baseUnit || "piece";
 
     rows.push({
       rowNumber: index + 2,
@@ -365,6 +427,7 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
       warehouseLowStockThresholds:
         warehouseLowStockThresholds.length > 0 ? warehouseLowStockThresholds : undefined,
       stockUnit,
+      parseErrors: parseErrors.length > 0 ? parseErrors : undefined,
     });
   });
 
@@ -377,14 +440,16 @@ export function parseProductExcelBuffer(buffer: Buffer): ParsedProductImportRow[
 }
 
 function validateParsedRow(row: ParsedProductImportRow): string[] {
-  const errors: string[] = [];
+  const errors: string[] = [...(row.parseErrors ?? [])];
   if (!row.brandName) errors.push("Brand is required");
   if (!row.primaryName || row.primaryName.length < 2) {
     errors.push("Product primary name must be at least 2 characters");
   }
   if (!row.baseUnit) errors.push("Unit is required");
   if (!Number.isFinite(row.unitsPerStockUnit) || row.unitsPerStockUnit < 1) {
-    errors.push("Units in a carton must be at least 1");
+    if (!errors.some((e) => e.startsWith("Units in a carton"))) {
+      errors.push("Units in a carton must be at least 1");
+    }
   }
   if (
     row.secondaryName &&
@@ -454,23 +519,14 @@ function buildExplicitWarehouseThresholds(
   parsed: ParsedProductImportRow,
   warehouses: Array<{ _id: Types.ObjectId; name: string; code: string }>
 ): WarehouseLowStockImportEntry[] {
-  const warehouseByKey = new Map<string, { _id: Types.ObjectId; name: string }>();
-  for (const warehouse of warehouses) {
-    warehouseByKey.set(warehouse.name.trim().toLowerCase(), warehouse);
-    warehouseByKey.set(warehouse.code.trim().toLowerCase(), warehouse);
+  const { resolved, errors } = resolveWarehouseImportEntries(
+    parsed.warehouseLowStockThresholds,
+    warehouses
+  );
+  if (errors.length > 0) {
+    throw new BadRequestError(errors.join("; "));
   }
-
-  const entries: WarehouseLowStockImportEntry[] = [];
-  for (const entry of parsed.warehouseLowStockThresholds ?? []) {
-    const warehouse = warehouseByKey.get(entry.warehouseName.trim().toLowerCase());
-    if (!warehouse) continue;
-    entries.push({
-      warehouseName: warehouse.name,
-      warehouseId: String(warehouse._id),
-      lowStockThreshold: entry.lowStockThreshold,
-    });
-  }
-  return entries;
+  return resolved;
 }
 
 async function resetImportedProductStockToZero(
@@ -540,7 +596,8 @@ async function resolveBrandForRow(
     mergeTargetBrandId?: string;
   },
   user: AuthUser,
-  brands: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }>
+  brands: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }>,
+  session?: ClientSession | null
 ) {
   if (row.brandAction === "merge") {
     const targetId = row.mergeTargetBrandId;
@@ -549,7 +606,9 @@ async function resolveBrandForRow(
     }
     let brand = brands.find((item) => String(item._id) === targetId);
     if (!brand) {
-      const loaded = await Brand.findOne({ _id: targetId, isActive: true }).lean();
+      const loaded = await Brand.findOne({ _id: targetId, isActive: true })
+        .session(session ?? null)
+        .lean();
       if (loaded) {
         brand = loaded;
         brands.push(loaded);
@@ -570,10 +629,16 @@ async function resolveBrandForRow(
       name: {
         $regex: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
       },
-    }).lean();
+    })
+      .session(session ?? null)
+      .lean();
     if (loaded) {
       if (loaded.isActive === false) {
-        await Brand.updateOne({ _id: loaded._id }, { $set: { isActive: true } });
+        await Brand.updateOne(
+          { _id: loaded._id },
+          { $set: { isActive: true } },
+          dbSession(session)
+        );
         loaded.isActive = true;
         brand = loaded;
         brands.push(loaded);
@@ -592,19 +657,24 @@ async function resolveBrandForRow(
     return brand;
   }
 
-  const created = await createBrand({ name: trimmed, isActive: true });
-  const brandDoc = await Brand.findById(created.id).lean();
+  const created = await createBrand({ name: trimmed, isActive: true }, session);
+  const brandDoc = await Brand.findById(created.id).session(session ?? null).lean();
   if (!brandDoc) {
     throw new NotFoundError("Brand not found after create");
   }
   brands.push(brandDoc);
-  await AuditLog.create({
-    action: "BRAND_CREATED",
-    entity: "Brand",
-    entityId: brandDoc._id,
-    userId: user.id,
-    metadata: { name: trimmed, source: "product_import" },
-  });
+  await AuditLog.create(
+    [
+      {
+        action: "BRAND_CREATED",
+        entity: "Brand",
+        entityId: brandDoc._id,
+        userId: user.id,
+        metadata: { name: trimmed, source: "product_import" },
+      },
+    ],
+    dbSession(session)
+  );
   return brandDoc;
 }
 
@@ -641,28 +711,36 @@ export async function previewProductImport(fileBuffer: Buffer) {
     let matchedProduct: ProductImportPreviewRow["matchedProduct"];
     let reactivatesProduct: ProductImportPreviewRow["reactivatesProduct"];
     if (brand && errors.length === 0) {
-      const match = findProductByBrandLabelOverlap(
-        allProducts,
-        String(brand._id),
-        row.primaryName,
-        row.secondaryName,
-        (product) => String(product.brandId)
-      );
-      if (match) {
-        matchedProduct = {
-          id: String(match._id),
-          name: match.name,
-          secondaryName: match.secondaryName,
-          baseUnit: match.baseUnit ?? "piece",
-          stockUnit: match.stockUnit ?? "unit",
-          unitsPerStockUnit: match.unitsPerStockUnit ?? 1,
-          lowStockThreshold: match.lowStockThreshold,
-        };
-        if (match.isActive === false) {
-          reactivatesProduct = {
+      try {
+        const match = findProductByBrandLabelOverlap(
+          allProducts,
+          String(brand._id),
+          row.primaryName,
+          row.secondaryName,
+          (product) => String(product.brandId)
+        );
+        if (match) {
+          matchedProduct = {
             id: String(match._id),
             name: match.name,
+            secondaryName: match.secondaryName,
+            baseUnit: match.baseUnit ?? "piece",
+            stockUnit: match.stockUnit ?? "unit",
+            unitsPerStockUnit: match.unitsPerStockUnit ?? 1,
+            lowStockThreshold: match.lowStockThreshold,
           };
+          if (match.isActive === false) {
+            reactivatesProduct = {
+              id: String(match._id),
+              name: match.name,
+            };
+          }
+        }
+      } catch (err) {
+        if (err instanceof BadRequestError) {
+          errors.push(err.message);
+        } else {
+          throw err;
         }
       }
     }
@@ -682,6 +760,20 @@ export async function previewProductImport(fileBuffer: Buffer) {
       matchedProduct,
     };
   });
+
+  const seenInFile = new Map<string, number>();
+  for (const row of previewRows) {
+    if (!row.brandName || !row.primaryName) continue;
+    const key = productImportDedupeKey(row.brandName, row.primaryName);
+    const firstRow = seenInFile.get(key);
+    if (firstRow != null) {
+      row.errors.push(
+        `Duplicate of row ${firstRow} (same brand + product name in this file)`
+      );
+    } else {
+      seenInFile.set(key, row.rowNumber);
+    }
+  }
 
   return {
     totalRows: previewRows.length,
@@ -754,6 +846,7 @@ export async function confirmProductImport(
   const results: ProductImportResultRow[] = [];
   let successCount = 0;
   let failedCount = 0;
+  const seenInFile = new Map<string, number>();
 
   for (const row of input.rows) {
     const base = resultRowFromInput(row);
@@ -772,11 +865,33 @@ export async function confirmProductImport(
     };
 
     const errors = validateParsedRow(parsed);
+    const warehouseResolution = resolveWarehouseImportEntries(
+      parsed.warehouseLowStockThresholds,
+      warehouses
+    );
+    errors.push(...warehouseResolution.errors);
+    if (warehouseResolution.resolved.length > 0) {
+      parsed.warehouseLowStockThresholds = warehouseResolution.resolved;
+    }
+
     if (errors.length > 0) {
       results.push({ ...base, status: "FAILED", message: errors.join("; ") });
       failedCount++;
       continue;
     }
+
+    const dedupeKey = productImportDedupeKey(row.brandName, row.primaryName);
+    const firstRow = seenInFile.get(dedupeKey);
+    if (firstRow != null) {
+      results.push({
+        ...base,
+        status: "FAILED",
+        message: `Duplicate of row ${firstRow} (same brand + product name in this file)`,
+      });
+      failedCount++;
+      continue;
+    }
+    seenInFile.set(dedupeKey, row.rowNumber);
 
     if (
       row.action === "merge" &&
@@ -792,102 +907,120 @@ export async function confirmProductImport(
     }
 
     try {
-      const brand = await resolveBrandForRow(
-        {
-          brandName: row.brandName,
-          brandAction: row.brandAction,
-          mergeTargetBrandId: row.mergeTargetBrandId,
-        },
-        user,
-        brands
-      );
-      const brandId = String(brand._id);
-
       const rowResult = await runInTransaction(async (session) => {
-      if (row.action === "merge") {
-        const targetId = row.mergeTargetProductId;
-        let targetProduct =
-          targetId && Types.ObjectId.isValid(targetId)
-            ? allProducts.find((product) => String(product._id) === targetId)
-            : undefined;
-
-        if (!targetProduct && targetId && Types.ObjectId.isValid(targetId)) {
-          const loaded = await Product.findById(targetId).lean();
-          if (loaded) {
-            targetProduct = loaded;
-          }
-        }
-
-        if (targetProduct && String(targetProduct.brandId) !== brandId) {
-          throw new BadRequestError(
-            "Selected product belongs to a different brand. Pick a product under the chosen brand."
-          );
-        }
-
-        if (!targetProduct) {
-          targetProduct = findProductByBrandLabelOverlap(
-            allProducts,
-            brandId,
-            row.primaryName,
-            row.secondaryName,
-            (product) => String(product.brandId)
-          );
-        }
-
-        if (!targetProduct) {
-          throw new BadRequestError("No matching product found to merge into");
-        }
-
-        const wasInactive = targetProduct.isActive === false;
-        const payload = productPayloadFromRow(parsed, brandId);
-        const nextName = payload.name;
-        const nextSecondary =
-          payload.secondaryName &&
-          normalizeProductName(payload.secondaryName) !==
-            normalizeProductName(nextName)
-            ? payload.secondaryName
-            : targetProduct.secondaryName;
-        await updateProduct(
-          String(targetProduct._id),
+        const brand = await resolveBrandForRow(
           {
-            name: nextName,
-            baseUnit: payload.baseUnit,
-            stockUnit: payload.stockUnit,
-            unitsPerStockUnit: payload.unitsPerStockUnit,
-            totalLowStockThreshold: payload.totalLowStockThreshold,
-            secondaryName: nextSecondary,
-            ...(wasInactive ? { isActive: true } : {}),
+            brandName: row.brandName,
+            brandAction: row.brandAction,
+            mergeTargetBrandId: row.mergeTargetBrandId,
           },
+          user,
+          brands,
           session
         );
-        await finalizeImportedProduct(String(targetProduct._id), parsed, user, undefined, session);
+        const brandId = String(brand._id);
 
+        if (row.action === "merge") {
+          const targetId = row.mergeTargetProductId;
+          let targetProduct =
+            targetId && Types.ObjectId.isValid(targetId)
+              ? allProducts.find((product) => String(product._id) === targetId)
+              : undefined;
+
+          if (!targetProduct && targetId && Types.ObjectId.isValid(targetId)) {
+            const loaded = await Product.findById(targetId)
+              .session(session ?? null)
+              .lean();
+            if (loaded) {
+              targetProduct = loaded;
+            }
+          }
+
+          if (targetProduct && String(targetProduct.brandId) !== brandId) {
+            throw new BadRequestError(
+              "Selected product belongs to a different brand. Pick a product under the chosen brand."
+            );
+          }
+
+          if (!targetProduct) {
+            targetProduct = findProductByBrandLabelOverlap(
+              allProducts,
+              brandId,
+              row.primaryName,
+              row.secondaryName,
+              (product) => String(product.brandId)
+            );
+          }
+
+          if (!targetProduct) {
+            throw new BadRequestError("No matching product found to merge into");
+          }
+
+          const wasInactive = targetProduct.isActive === false;
+          const payload = productPayloadFromRow(parsed, brandId);
+          const nextName = payload.name;
+          const nextSecondary =
+            payload.secondaryName &&
+            normalizeProductName(payload.secondaryName) !==
+              normalizeProductName(nextName)
+              ? payload.secondaryName
+              : targetProduct.secondaryName;
+          await updateProduct(
+            String(targetProduct._id),
+            {
+              name: nextName,
+              baseUnit: payload.baseUnit,
+              stockUnit: payload.stockUnit,
+              unitsPerStockUnit: payload.unitsPerStockUnit,
+              totalLowStockThreshold: payload.totalLowStockThreshold,
+              secondaryName: nextSecondary,
+              ...(wasInactive ? { isActive: true } : {}),
+            },
+            session
+          );
+          await finalizeImportedProduct(
+            String(targetProduct._id),
+            parsed,
+            user,
+            undefined,
+            session
+          );
+
+          return {
+            status: "SUCCESS" as const,
+            message: wasInactive
+              ? `Reactivated and merged into "${targetProduct.name}"`
+              : `Merged into "${targetProduct.name}"`,
+            productId: String(targetProduct._id),
+            wasInactive,
+            targetProductId: String(targetProduct._id),
+          };
+        }
+
+        const created = await createProduct(
+          productPayloadFromRow(parsed, brandId),
+          session
+        );
+        await finalizeImportedProduct(
+          created.id,
+          parsed,
+          user,
+          { resetStock: true },
+          session
+        );
         return {
           status: "SUCCESS" as const,
-          message: wasInactive
-            ? `Reactivated and merged into "${targetProduct.name}"`
-            : `Merged into "${targetProduct.name}"`,
-          productId: String(targetProduct._id),
-          wasInactive,
-          targetProductId: String(targetProduct._id),
+          message: "Created new product",
+          productId: created.id,
+          createdProduct: await Product.findById(created.id)
+            .session(session ?? null)
+            .lean(),
         };
-      }
-
-      const created = await createProduct(
-        productPayloadFromRow(parsed, brandId),
-        session
-      );
-      await finalizeImportedProduct(created.id, parsed, user, { resetStock: true }, session);
-      return {
-        status: "SUCCESS" as const,
-        message: "Created new product",
-        productId: created.id,
-        createdProduct: await Product.findById(created.id).lean(),
-      };
       });
 
       if (rowResult.createdProduct) {
         products.push(rowResult.createdProduct);
+        allProducts.push(rowResult.createdProduct);
       }
       if (rowResult.wasInactive && rowResult.targetProductId) {
         const idx = allProducts.findIndex(

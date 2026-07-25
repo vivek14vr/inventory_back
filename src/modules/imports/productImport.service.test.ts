@@ -218,4 +218,61 @@ describe("parseProductExcelBuffer", () => {
 
     assert.equal(rows.length, 1);
   });
+
+  it("does not silently default blank unit or invalid pack size", () => {
+    const rows = parseProductExcelBuffer(
+      buildWorkbook([
+        {
+          brand: "Brand A",
+          "product primary name": "Widget",
+          unit: "",
+          "units in a carton": "abc",
+        },
+      ])
+    );
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].baseUnit, "");
+    assert.equal(Number.isFinite(rows[0].unitsPerStockUnit), false);
+    assert.ok(rows[0].parseErrors?.some((e) => e.includes("Units in a carton")));
+  });
+
+  it("records errors for invalid low-stock numbers instead of dropping them", () => {
+    const rows = parseProductExcelBuffer(
+      buildWorkbook([
+        {
+          brand: "Brand A",
+          "product primary name": "Plate",
+          unit: "piece",
+          "units in a cartoon": 800,
+          "total low quantity cartoon": -5,
+          "low quantity unit in Goregaon": "nope",
+        },
+      ])
+    );
+
+    assert.equal(rows[0].totalLowStockThreshold, undefined);
+    assert.equal(rows[0].warehouseLowStockThresholds, undefined);
+    assert.ok(
+      rows[0].parseErrors?.some((e) => e.includes("Total low quantity carton"))
+    );
+    assert.ok(
+      rows[0].parseErrors?.some((e) => e.includes("Low quantity unit in Goregaon"))
+    );
+  });
+
+  it("requires units in a carton when the cell is blank", () => {
+    const rows = parseProductExcelBuffer(
+      buildWorkbook([
+        {
+          brand: "Brand A",
+          "product primary name": "Widget",
+          unit: "piece",
+          "units in a carton": "",
+        },
+      ])
+    );
+
+    assert.ok(rows[0].parseErrors?.includes("Units in a carton is required"));
+  });
 });

@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import mongoose from "mongoose";
+import { ZodError } from "zod";
 import { AppError } from "../errors/AppError.js";
 import { env } from "../../config/env.js";
 
@@ -14,6 +15,16 @@ export function errorHandler(
       success: false,
       message: err.message,
       code: err.code,
+    });
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    const message = err.issues[0]?.message ?? "Validation failed";
+    res.status(400).json({
+      success: false,
+      message,
+      code: "VALIDATION_ERROR",
     });
     return;
   }

@@ -1,10 +1,11 @@
-import { Types } from "mongoose";
+import { Types, type ClientSession } from "mongoose";
 import { Brand } from "../../models/Brand.js";
 import { Product } from "../../models/Product.js";
 import {
   BadRequestError,
   NotFoundError,
 } from "../../shared/errors/AppError.js";
+import { dbSession } from "../../shared/utils/mongoTransaction.js";
 import type { CreateBrandInput, UpdateBrandInput } from "./brands.validation.js";
 
 export function toPublicBrand(doc: {
@@ -40,16 +41,24 @@ export async function getBrandById(id: string) {
   return toPublicBrand(brand);
 }
 
-export async function createBrand(input: CreateBrandInput) {
-  const existing = await Brand.findOne({ name: input.name });
+export async function createBrand(
+  input: CreateBrandInput,
+  session?: ClientSession | null
+) {
+  const existing = await Brand.findOne({ name: input.name }).session(session ?? null);
   if (existing) {
     throw new BadRequestError("Brand name already exists");
   }
 
-  const brand = await Brand.create({
-    name: input.name,
-    isActive: input.isActive ?? true,
-  });
+  const [brand] = await Brand.create(
+    [
+      {
+        name: input.name,
+        isActive: input.isActive ?? true,
+      },
+    ],
+    dbSession(session)
+  );
 
   return toPublicBrand(brand.toObject());
 }
