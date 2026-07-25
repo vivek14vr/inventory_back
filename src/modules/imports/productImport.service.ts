@@ -451,12 +451,6 @@ function validateParsedRow(row: ParsedProductImportRow): string[] {
       errors.push("Units in a carton must be at least 1");
     }
   }
-  if (
-    row.secondaryName &&
-    normalizeProductName(row.secondaryName) === normalizeProductName(row.primaryName)
-  ) {
-    errors.push("Primary and secondary names must be different");
-  }
   return errors;
 }
 
@@ -958,17 +952,13 @@ export async function confirmProductImport(
 
           const wasInactive = targetProduct.isActive === false;
           const payload = productPayloadFromRow(parsed, brandId);
-          const nextName = payload.name;
-          const nextSecondary =
-            payload.secondaryName &&
-            normalizeProductName(payload.secondaryName) !==
-              normalizeProductName(nextName)
-              ? payload.secondaryName
-              : targetProduct.secondaryName;
+          const nextSecondary = parsed.secondaryName?.trim()
+            ? payload.secondaryName
+            : targetProduct.secondaryName;
           await updateProduct(
             String(targetProduct._id),
             {
-              name: nextName,
+              name: payload.name,
               baseUnit: payload.baseUnit,
               stockUnit: payload.stockUnit,
               unitsPerStockUnit: payload.unitsPerStockUnit,

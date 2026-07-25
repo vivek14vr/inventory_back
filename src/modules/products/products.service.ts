@@ -83,16 +83,14 @@ async function assertUniqueProductLabels(
   secondaryName?: string,
   excludeId?: string
 ) {
-  const labels = [name, secondaryName]
-    .map((label) => label?.trim())
-    .filter((label): label is string => Boolean(label))
-    .map((label) => normalizeProductName(label));
-
-  if (new Set(labels).size !== labels.length) {
-    throw new BadRequestError(
-      "Primary and secondary names must be different for the same product"
-    );
-  }
+  const labels = [
+    ...new Set(
+      [name, secondaryName]
+        .map((label) => label?.trim())
+        .filter((label): label is string => Boolean(label))
+        .map((label) => normalizeProductName(label))
+    ),
+  ];
 
   const filter: Record<string, unknown> = {
     brandId,
