@@ -32,6 +32,35 @@ export const stockInSchema = z.object({
   notes: z.string().max(500).optional(),
 });
 
+export const stockInBatchSchema = z
+  .object({
+    warehouseId: z.string().optional(),
+    brandId: z.string().min(1, "Brand is required"),
+    notes: z.string().max(500).optional(),
+    items: z
+      .array(
+        z.object({
+          productId: z.string().min(1, "Product is required"),
+          quantity: z.coerce.number().int().min(1, "Quantity must be at least 1"),
+        })
+      )
+      .min(1, "Add at least one product"),
+  })
+  .superRefine((data, ctx) => {
+    const seen = new Set<string>();
+    for (let i = 0; i < data.items.length; i++) {
+      const item = data.items[i];
+      if (seen.has(item.productId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Each product can only appear once per stock-in",
+          path: ["items", i, "productId"],
+        });
+      }
+      seen.add(item.productId);
+    }
+  });
+
 export const stockOutSchema = z
   .object({
     warehouseId: z.string().optional(),
@@ -93,6 +122,7 @@ export const stockOutBatchSchema = z
   });
 
 export type StockInInput = z.infer<typeof stockInSchema>;
+export type StockInBatchInput = z.infer<typeof stockInBatchSchema>;
 export type StockOutInput = z.infer<typeof stockOutSchema>;
 export type StockOutBatchInput = z.infer<typeof stockOutBatchSchema>;
 

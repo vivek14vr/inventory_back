@@ -67,11 +67,16 @@ export function toPublicProduct(doc: ProductDoc) {
   };
 }
 
-async function validateBrand(brandId: string): Promise<void> {
+async function validateBrand(
+  brandId: string,
+  session?: ClientSession | null
+): Promise<void> {
   if (!Types.ObjectId.isValid(brandId)) {
     throw new BadRequestError("Invalid brand ID");
   }
-  const brand = await Brand.findOne({ _id: brandId, isActive: true });
+  const brand = await Brand.findOne({ _id: brandId, isActive: true }).session(
+    session ?? null
+  );
   if (!brand) {
     throw new NotFoundError("Brand not found or inactive");
   }
@@ -81,7 +86,8 @@ async function assertUniqueProductLabels(
   brandId: string,
   name: string,
   secondaryName?: string,
-  excludeId?: string
+  excludeId?: string,
+  session?: ClientSession | null
 ) {
   const labels = [
     ...new Set(
@@ -99,7 +105,10 @@ async function assertUniqueProductLabels(
     filter._id = { $ne: excludeId };
   }
 
-  const products = await Product.find(filter).select("name secondaryName").lean();
+  const products = await Product.find(filter)
+    .select("name secondaryName")
+    .session(session ?? null)
+    .lean();
   const conflict = products.find((product) => {
     const existingLabels = [product.name, product.secondaryName]
       .map((label) => label?.trim())
@@ -205,8 +214,14 @@ export async function createProduct(
   input: CreateProductInput,
   session?: ClientSession | null
 ) {
-  await validateBrand(input.brandId);
-  await assertUniqueProductLabels(input.brandId, input.name, input.secondaryName);
+  await validateBrand(input.brandId, session);
+  await assertUniqueProductLabels(
+    input.brandId,
+    input.name,
+    input.secondaryName,
+    undefined,
+    session
+  );
 
   const normalized = normalizeProductName(input.name);
 
@@ -267,7 +282,7 @@ export async function updateProduct(
 
   const nextBrandId = input.brandId ?? String(product.brandId);
   if (input.brandId) {
-    await validateBrand(input.brandId);
+    await validateBrand(input.brandId, session);
     product.brandId = new Types.ObjectId(input.brandId);
   }
 
@@ -310,7 +325,8 @@ export async function updateProduct(
     nextBrandId,
     product.name,
     product.secondaryName,
-    id
+    id,
+    session
   );
 
   try {

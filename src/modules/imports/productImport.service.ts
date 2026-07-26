@@ -984,6 +984,9 @@ export async function confirmProductImport(
             productId: String(targetProduct._id),
             wasInactive,
             targetProductId: String(targetProduct._id),
+            mergedProduct: await Product.findById(targetProduct._id)
+              .session(session ?? null)
+              .lean(),
           };
         }
 
@@ -1012,12 +1015,14 @@ export async function confirmProductImport(
         products.push(rowResult.createdProduct);
         allProducts.push(rowResult.createdProduct);
       }
-      if (rowResult.wasInactive && rowResult.targetProductId) {
+      if (rowResult.mergedProduct && rowResult.targetProductId) {
         const idx = allProducts.findIndex(
           (product) => String(product._id) === rowResult.targetProductId
         );
         if (idx >= 0) {
-          allProducts[idx] = { ...allProducts[idx], isActive: true };
+          allProducts[idx] = rowResult.mergedProduct;
+        } else {
+          allProducts.push(rowResult.mergedProduct);
         }
       }
 

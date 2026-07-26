@@ -16,6 +16,7 @@ import {
   clientReturnListQuerySchema,
   clientReturnSubmitSchema,
   productAvailabilityQuerySchema,
+  stockInBatchSchema,
   stockInSchema,
   stockOutBatchSchema,
   stockOutSchema,
@@ -94,6 +95,19 @@ router.post(
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
     }
     const result = await stockService.stockIn(parsed.data, req.user!);
+    sendSuccess(res, result, 201);
+  })
+);
+
+router.post(
+  "/in/batch",
+  requirePermission(Permission.STOCK_IN, { warehouseIdFrom: "body" }),
+  asyncHandler(async (req, res) => {
+    const parsed = stockInBatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
+    }
+    const result = await stockService.stockInBatch(parsed.data, req.user!);
     sendSuccess(res, result, 201);
   })
 );

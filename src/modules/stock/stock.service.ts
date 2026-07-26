@@ -43,6 +43,7 @@ import * as inventoryService from "./inventory.service.js";
 import type {
   BalancesQuery,
   ProductAvailabilityQuery,
+  StockInBatchInput,
   StockInInput,
   StockOutBatchInput,
   StockOutInput,
@@ -328,6 +329,128 @@ export async function stockIn(input: StockInInput, user: AuthUser) {
       populated as unknown as Parameters<typeof toMovementResponse>[0]
     ),
     balance,
+  };
+}
+
+export async function stockInBatch(input: StockInBatchInput, user: AuthUser) {
+  const warehouseId = resolveWarehouseId(
+    user,
+    input.warehouseId,
+    Permission.STOCK_IN
+  );
+
+  const [warehouse, brand] = await Promise.all([
+    Warehouse.findById(warehouseId).lean(),
+    Brand.findById(input.brandId).lean(),
+  ]);
+
+  if (!warehouse || warehouse.isActive === false) {
+    throw new BadRequestError("Selected warehouse is inactive");
+  }
+  if (!brand) {
+    throw new NotFoundError("Brand not found");
+  }
+  if (brand.isActive === false) {
+    throw new BadRequestError("Selected brand is inactive");
+  }
+
+  const notes = input.notes?.trim() || undefined;
+  const validatedLines: Array<{
+    productId: Types.ObjectId;
+    brandId: Types.ObjectId;
+    productName: string;
+    quantity: number;
+  }> = [];
+
+  for (const item of input.items) {
+    const { productId, brandId, name: productName } =
+      await inventoryService.validateProductForBrand(item.productId, input.brandId);
+    validatedLines.push({
+      productId,
+      brandId,
+      productName,
+      quantity: item.quantity,
+    });
+  }
+
+  const txnResult = await runInTransaction(async (session) => {
+    const movementIds: Types.ObjectId[] = [];
+    const balances: Record<string, number> = {};
+
+    for (const line of validatedLines) {
+      const newQty = await inventoryService.adjustBalance(
+        warehouseId,
+        String(line.productId),
+        line.quantity,
+        session
+      );
+      balances[String(line.productId)] = newQty;
+
+      const [movement] = await StockMovement.create(
+        [
+          {
+            type: StockMovementType.STOCK_IN,
+            warehouseId,
+            productId: line.productId,
+            brandId: line.brandId,
+            quantity: line.quantity,
+            balanceAfter: newQty,
+            notes,
+            createdBy: user.id,
+          },
+        ],
+        dbSession(session)
+      );
+      movementIds.push(movement._id);
+
+      await AuditLog.create(
+        [
+          {
+            action: "STOCK_IN",
+            entity: "StockMovement",
+            entityId: movement._id,
+            userId: user.id,
+            metadata: buildStockMovementAuditMetadata({
+              quantity: line.quantity,
+              warehouse: warehouse as {
+                _id: Types.ObjectId;
+                name: string;
+                code: string;
+              } | null,
+              product: { _id: line.productId, name: line.productName },
+              brand: brand as { _id: Types.ObjectId; name: string } | null,
+              notes,
+            }),
+          },
+        ],
+        dbSession(session)
+      );
+    }
+
+    return { movementIds, balances };
+  });
+
+  const populated = await StockMovement.find({ _id: { $in: txnResult.movementIds } })
+    .populate("productId", "name")
+    .populate("brandId", "name")
+    .populate("warehouseId", "name code")
+    .lean();
+
+  const order = new Map(
+    txnResult.movementIds.map((id, index) => [String(id), index])
+  );
+  populated.sort(
+    (a, b) =>
+      (order.get(String(a._id)) ?? 0) - (order.get(String(b._id)) ?? 0)
+  );
+
+  return {
+    movements: populated.map((m) =>
+      toMovementResponse(m as unknown as Parameters<typeof toMovementResponse>[0])
+    ),
+    balances: txnResult.balances,
+    brandId: String(brand._id),
+    brandName: brand.name,
   };
 }
 
