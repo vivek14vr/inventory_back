@@ -26,6 +26,7 @@ import {
   buildStockMovementAuditMetadata,
   buildTransferAuditMetadata,
 } from "../../shared/utils/auditMetadata.js";
+import type { PermissionCode } from "../../shared/constants/permissions.js";
 import { Permission } from "../../shared/constants/permissions.js";
 import {
   getWarehouseIdsForPermission,
@@ -1023,11 +1024,15 @@ async function acquireSalesInvoiceClaim(
   );
 }
 
-export async function stockOutBatch(input: StockOutBatchInput, user: AuthUser) {
+export async function stockOutBatch(
+  input: StockOutBatchInput,
+  user: AuthUser,
+  options?: { warehousePermission?: PermissionCode }
+) {
   const warehouseId = resolveWarehouseId(
     user,
     input.warehouseId,
-    Permission.STOCK_OUT
+    options?.warehousePermission ?? Permission.STOCK_OUT
   );
 
   const sourceWarehouse = await Warehouse.findById(warehouseId).lean();

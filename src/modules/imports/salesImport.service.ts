@@ -702,8 +702,8 @@ async function resolveClientForVoucher(
   await AuditLog.create({
     action: "CLIENT_CREATED",
     entity: "Client",
-    entityId: created.id,
-    userId: user.id,
+    entityId: new Types.ObjectId(created.id),
+    userId: new Types.ObjectId(user.id),
     metadata: { name: trimmed, source: "sales_import" },
   });
   return { clientName: created.name, created: true, clientId: created.id };
@@ -1084,8 +1084,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
           await AuditLog.create({
             action: "PRODUCT_CREATED",
             entity: "Product",
-            entityId: resolvedProduct.productId,
-            userId: user.id,
+            entityId: new Types.ObjectId(resolvedProduct.productId),
+            userId: new Types.ObjectId(user.id),
             metadata: {
               name: baseLine.productName,
               brandId: resolvedProduct.brandId,
@@ -1115,7 +1115,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
             quantity: item.quantity,
           })),
         },
-        user
+        user,
+        { warehousePermission: Permission.IMPORTS_SALES }
       );
 
       for (const { baseLine } of lineValidations) {

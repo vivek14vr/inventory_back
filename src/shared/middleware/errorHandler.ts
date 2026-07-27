@@ -39,6 +39,15 @@ export function errorHandler(
     return;
   }
 
+  if (err instanceof mongoose.Error.CastError) {
+    res.status(400).json({
+      success: false,
+      message: `Invalid ${err.path || "value"}`,
+      code: "VALIDATION_ERROR",
+    });
+    return;
+  }
+
   if ((err as { code?: number }).code === 11000) {
     res.status(400).json({
       success: false,
