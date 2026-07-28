@@ -63,6 +63,8 @@ describe("parseSalesRegisterExcelBuffer", () => {
       sellDate: "25-Jun-25",
       clientName: "Acme Traders",
       invoiceNumber: "INV-001",
+      narrationRaw: "",
+      warehouseHint: "goregaon",
       lines: [
         {
           rowNumber: 5,
@@ -86,6 +88,8 @@ describe("parseSalesRegisterExcelBuffer", () => {
       sellDate: "26-Jun-25",
       clientName: "Beta Corp",
       invoiceNumber: "INV-002",
+      narrationRaw: "",
+      warehouseHint: "goregaon",
       lines: [
         {
           rowNumber: 8,
@@ -209,7 +213,7 @@ describe("parseSalesRegisterExcelBuffer", () => {
     ]);
   });
 
-  it("reads Narration for warehouse hint and Quantity after it", () => {
+  it("reads warehouse from invoice header Narration and applies to all lines", () => {
     const buffer = buildWorkbookBuffer([
       [
         "Date",
@@ -220,38 +224,39 @@ describe("parseSalesRegisterExcelBuffer", () => {
         "Narration",
         "Quantity",
       ],
-      ["01-Jul-26", "Acme Traders", "Acme Traders", "Sales", "INV-10", "", ""],
-      ["", "11 inch plate", "", "", "", "vasai", 100],
-      ["", "7 inch plate", "", "", "", "", 50],
-      ["", "Bad line", "", "", "", "mumbai", 10],
+      ["01-Jul-26", "Acme Traders", "Acme Traders", "Sales", "INV-10", "vasai", ""],
+      ["", "11 inch plate", "", "", "", "", 100],
+      ["", "7 inch plate", "", "", "", "ignored on product rows", 50],
+      ["02-Jul-26", "Beta Corp", "Beta Corp", "Sales", "INV-11", "", ""],
+      ["", "Cup", "", "", "", "", 25],
+      ["03-Jul-26", "Bad Co", "Bad Co", "Sales", "INV-12", "mumbai", ""],
+      ["", "Bowl", "", "", "", "", 10],
     ]);
 
     const vouchers = parseSalesRegisterExcelBuffer(buffer);
-    assert.equal(vouchers.length, 1);
-    assert.deepEqual(vouchers[0].lines, [
-      {
-        rowNumber: 3,
-        productName: "11 inch plate",
-        quantity: 100,
-        narrationRaw: "vasai",
-        warehouseHint: "vasai",
-      },
-      {
-        rowNumber: 4,
-        productName: "7 inch plate",
-        quantity: 50,
-        narrationRaw: "",
-        warehouseHint: "goregaon",
-      },
-      {
-        rowNumber: 5,
-        productName: "Bad line",
-        quantity: 10,
-        narrationRaw: "mumbai",
-        warehouseNarrationError:
-          'Narration must be empty (Goregaon) or contain "vasai" / "goregaon". Got "mumbai"',
-      },
-    ]);
+    assert.equal(vouchers.length, 3);
+
+    assert.equal(vouchers[0].warehouseHint, "vasai");
+    assert.equal(vouchers[0].narrationRaw, "vasai");
+    assert.deepEqual(
+      vouchers[0].lines.map((line) => ({
+        productName: line.productName,
+        warehouseHint: line.warehouseHint,
+        narrationRaw: line.narrationRaw,
+      })),
+      [
+        { productName: "11 inch plate", warehouseHint: "vasai", narrationRaw: "vasai" },
+        { productName: "7 inch plate", warehouseHint: "vasai", narrationRaw: "vasai" },
+      ]
+    );
+
+    assert.equal(vouchers[1].warehouseHint, "goregaon");
+    assert.equal(vouchers[1].narrationRaw, "");
+    assert.equal(vouchers[1].lines[0]?.warehouseHint, "goregaon");
+
+    assert.equal(vouchers[2].warehouseHint, undefined);
+    assert.ok(vouchers[2].warehouseNarrationError?.includes("mumbai"));
+    assert.ok(vouchers[2].lines[0]?.warehouseNarrationError?.includes("mumbai"));
   });
 
   it("throws when header row is missing", () => {

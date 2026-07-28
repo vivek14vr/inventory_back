@@ -52,6 +52,10 @@ export type ParsedSalesVoucher = {
   sellDate: string;
   clientName: string;
   invoiceNumber: string;
+  /** Warehouse comes from Narration on the invoice/client header row. */
+  narrationRaw: string;
+  warehouseHint?: SalesWarehouseHint;
+  warehouseNarrationError?: string;
   lines: ParsedSalesLine[];
 };
 
@@ -84,6 +88,11 @@ export type SalesImportVoucherPreview = {
   invoiceNumber: string;
   clientCategory: "matched" | "new";
   errors: string[];
+  narrationRaw?: string;
+  warehouseHint?: SalesWarehouseHint;
+  warehouseId?: string;
+  warehouseName?: string;
+  warehouseCode?: string;
   matchedClient?: {
     id: string;
     name: string;
@@ -406,6 +415,10 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
       if (isCancelledClient(clientName)) {
         continue;
       }
+      // Warehouse is on the invoice/client header row (Narration), not product lines.
+      const narrationRaw =
+        colNarration != null ? cellString(row[colNarration]) : "";
+      const warehouseParsed = parseWarehouseHintFromNarration(narrationRaw);
       voucherIndex += 1;
       current = {
         voucherIndex,
@@ -413,6 +426,10 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
         sellDate: cellFormattedValue(sheet, i, colDate, dateCell),
         clientName,
         invoiceNumber,
+        narrationRaw,
+        ...("hint" in warehouseParsed
+          ? { warehouseHint: warehouseParsed.hint }
+          : { warehouseNarrationError: warehouseParsed.error }),
         lines: [],
       };
       continue;
@@ -429,18 +446,17 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
     if (!productName) continue;
     if (quantity == null || quantity < 1) continue;
 
-    const narrationRaw =
-      colNarration != null ? cellString(row[colNarration]) : "";
-    const warehouseParsed = parseWarehouseHintFromNarration(narrationRaw);
-
+    // One invoice → one warehouse; inherit from the header row.
     current.lines.push({
       rowNumber: excelRowNumber,
       productName,
       quantity,
-      narrationRaw,
-      ...("hint" in warehouseParsed
-        ? { warehouseHint: warehouseParsed.hint }
-        : { warehouseNarrationError: warehouseParsed.error }),
+      narrationRaw: current.narrationRaw,
+      ...(current.warehouseHint
+        ? { warehouseHint: current.warehouseHint }
+        : current.warehouseNarrationError
+          ? { warehouseNarrationError: current.warehouseNarrationError }
+          : { warehouseHint: "goregaon" as const }),
     });
   }
 
@@ -464,6 +480,9 @@ function validateVoucher(voucher: ParsedSalesVoucher): string[] {
   if (!voucher.clientName) errors.push("Client name is required");
   if (!voucher.invoiceNumber) errors.push("Invoice number is required");
   if (voucher.lines.length === 0) errors.push("No product lines found for this invoice");
+  if (voucher.warehouseNarrationError) {
+    errors.push(voucher.warehouseNarrationError);
+  }
   return errors;
 }
 
@@ -568,25 +587,28 @@ export async function previewSalesImport(fileBuffer: Buffer) {
   const vouchers: SalesImportVoucherPreview[] = parsedVouchers.map((voucher) => {
     const voucherErrors = validateVoucher(voucher);
     const matchedClient = clientByName.get(normalizeEntityName(voucher.clientName));
+
+    let warehouseId: string | undefined;
+    let warehouseName: string | undefined;
+    let warehouseCode: string | undefined;
+    if (voucher.warehouseHint) {
+      const warehouse = findWarehouseByHint(warehouses, voucher.warehouseHint);
+      if (!warehouse) {
+        voucherErrors.push(
+          `Warehouse "${voucher.warehouseHint}" not found or inactive. Import cannot continue until Vasai and Goregaon warehouses exist.`
+        );
+      } else {
+        warehouseId = String(warehouse._id);
+        warehouseName = warehouse.name;
+        warehouseCode = warehouse.code;
+      }
+    } else if (!voucher.warehouseNarrationError) {
+      voucherErrors.push("Warehouse could not be resolved from invoice Narration");
+    }
+
     const lines: SalesImportLinePreview[] = voucher.lines.map((line) => {
       const lineErrors = validateLineOnly(line);
       let matchedProduct: SalesImportLinePreview["matchedProduct"];
-      let warehouseId: string | undefined;
-      let warehouseName: string | undefined;
-      let warehouseCode: string | undefined;
-
-      if (line.warehouseHint) {
-        const warehouse = findWarehouseByHint(warehouses, line.warehouseHint);
-        if (!warehouse) {
-          lineErrors.push(
-            `Warehouse "${line.warehouseHint}" not found or inactive. Import cannot continue until Vasai and Goregaon warehouses exist.`
-          );
-        } else {
-          warehouseId = String(warehouse._id);
-          warehouseName = warehouse.name;
-          warehouseCode = warehouse.code;
-        }
-      }
 
       if (lineErrors.length === 0) {
         try {
@@ -639,6 +661,11 @@ export async function previewSalesImport(fileBuffer: Buffer) {
       invoiceNumber: voucher.invoiceNumber,
       clientCategory: matchedClient ? "matched" : "new",
       errors: voucherErrors,
+      narrationRaw: voucher.narrationRaw,
+      warehouseHint: voucher.warehouseHint,
+      warehouseId,
+      warehouseName,
+      warehouseCode,
       matchedClient,
       lines,
     };
