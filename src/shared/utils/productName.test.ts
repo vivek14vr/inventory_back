@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { formatProductDisplayName, normalizeProductName } from "./productName.js";
 
-test("normalizeProductName lowercases and trims", () => {
-  assert.equal(normalizeProductName("  Cornstarch Spoon  "), "cornstarch spoon");
+test("normalizeProductName lowercases, trims, and removes spaces", () => {
+  assert.equal(normalizeProductName("  Cornstarch Spoon  "), "cornstarchspoon");
   assert.equal(normalizeProductName("BIODINE"), "biodine");
+  assert.equal(normalizeProductName("11 inch plate"), "11inchplate");
+  assert.equal(normalizeProductName("11  inch  plate"), "11inchplate");
+  assert.equal(normalizeProductName("11 Inch Plate"), "11inchplate");
 });
 
 test("formatProductDisplayName appends secondary name when present", () => {

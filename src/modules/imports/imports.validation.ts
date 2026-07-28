@@ -64,12 +64,15 @@ export const salesImportConfirmLineSchema = z
     productName: z.string().min(1).max(200),
     brandName: z.string().min(1).max(200),
     quantity: z.coerce.number().int().min(1),
+    warehouseId: z.string().min(1),
+    ignore: z.boolean().optional().default(false),
     brandAction: z.enum(["merge", "create"]),
     mergeTargetBrandId: z.string().optional(),
     action: z.enum(["merge", "create"]),
     mergeTargetProductId: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.ignore) return;
     if (data.brandAction === "merge" && !data.mergeTargetBrandId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -110,7 +113,6 @@ export const salesImportConfirmVoucherSchema = z
 
 export const salesImportConfirmSchema = z.object({
   fileName: z.string().max(255).optional(),
-  warehouseId: z.string().min(1),
   vouchers: z.array(salesImportConfirmVoucherSchema).min(1),
 });
 

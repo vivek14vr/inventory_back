@@ -119,7 +119,7 @@ async function assertUniqueProductLabels(
 
   if (conflict) {
     throw new BadRequestError(
-      "A product with this primary or secondary name already exists for the selected brand (names are not case sensitive)"
+      "A product with this primary or secondary name already exists for the selected brand (names are not case or space sensitive)"
     );
   }
 }
@@ -259,7 +259,7 @@ export async function createProduct(
   } catch (err: unknown) {
     if ((err as { code?: number }).code === 11000) {
       throw new BadRequestError(
-        "A product with this primary or secondary name already exists for the selected brand (names are not case sensitive)"
+        "A product with this primary or secondary name already exists for the selected brand (names are not case or space sensitive)"
       );
     }
     throw err;
@@ -339,7 +339,7 @@ export async function updateProduct(
   } catch (err: unknown) {
     if ((err as { code?: number }).code === 11000) {
       throw new BadRequestError(
-        "A product with this primary or secondary name already exists for the selected brand (names are not case sensitive)"
+        "A product with this primary or secondary name already exists for the selected brand (names are not case or space sensitive)"
       );
     }
     throw err;

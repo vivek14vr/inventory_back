@@ -19,6 +19,7 @@ import {
   indexProductsByBrandAndLabel,
   productBrandKey,
 } from "../../shared/utils/productLookup.js";
+import { normalizeEntityName } from "../../shared/utils/productName.js";
 import { assertPermission } from "../../shared/utils/permissions.js";
 import * as inventoryService from "../stock/inventory.service.js";
 
@@ -119,7 +120,7 @@ export async function processTallyImport(
 
   const brands = await Brand.find({ isActive: true }).lean();
   const brandByName = new Map(
-    brands.map((b) => [b.name.trim().toLowerCase(), b])
+    brands.map((b) => [normalizeEntityName(b.name), b])
   );
 
   const products = await Product.find({ isActive: true })
@@ -175,7 +176,7 @@ export async function processTallyImport(
     }
     seen.add(dupKey);
 
-    const brand = brandByName.get(row.brandName.trim().toLowerCase());
+    const brand = brandByName.get(normalizeEntityName(row.brandName));
     if (!brand) {
       results.push({
         ...base,

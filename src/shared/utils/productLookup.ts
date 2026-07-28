@@ -1,7 +1,7 @@
 import { BadRequestError } from "../errors/AppError.js";
 import { normalizeProductName } from "./productName.js";
 
-/** Case-insensitive lookup key for brand + product label (primary or secondary name). */
+/** Case- and space-insensitive lookup key for brand + product label. */
 export function productBrandKey(brandName: string, label: string): string {
   return `${normalizeProductName(brandName)}|${normalizeProductName(label)}`;
 }

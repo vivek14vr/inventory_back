@@ -8,7 +8,10 @@ import { Warehouse } from "../../models/Warehouse.js";
 import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
-import { normalizeProductName } from "../../shared/utils/productName.js";
+import {
+  normalizeEntityName,
+  normalizeProductName,
+} from "../../shared/utils/productName.js";
 import { findProductByBrandLabelOverlap } from "../../shared/utils/productLookup.js";
 import { createBrand } from "../brands/brands.service.js";
 import { createProduct, updateProduct } from "../products/products.service.js";
@@ -137,7 +140,7 @@ function parseUnitsPerCarton(
 }
 
 function productImportDedupeKey(brandName: string, primaryName: string): string {
-  return `${brandName.trim().toLowerCase()}::${normalizeProductName(primaryName)}`;
+  return `${normalizeEntityName(brandName)}::${normalizeProductName(primaryName)}`;
 }
 
 function resolveLowStockValue(
@@ -466,11 +469,11 @@ function resolveWarehouseImportEntries(
   const errors: string[] = [];
 
   for (const entry of entries) {
-    const needle = entry.warehouseName.trim().toLowerCase();
+    const needle = normalizeEntityName(entry.warehouseName);
     const warehouse = warehouses.find(
       (wh) =>
-        wh.name.trim().toLowerCase() === needle ||
-        wh.code.trim().toLowerCase() === needle
+        normalizeEntityName(wh.name) === needle ||
+        normalizeEntityName(wh.code) === needle
     );
     if (!warehouse) {
       errors.push(`Unknown warehouse "${entry.warehouseName}" in low-stock columns`);
@@ -563,11 +566,11 @@ async function finalizeImportedProduct(
 async function loadImportContext() {
   const brands = await Brand.find({ isActive: true }).lean();
   const brandByName = new Map(
-    brands.map((brand) => [brand.name.trim().toLowerCase(), brand])
+    brands.map((brand) => [normalizeEntityName(brand.name), brand])
   );
   const allBrands = await Brand.find().lean();
   const allBrandByName = new Map(
-    allBrands.map((brand) => [brand.name.trim().toLowerCase(), brand])
+    allBrands.map((brand) => [normalizeEntityName(brand.name), brand])
   );
 
   const products = await Product.find({ isActive: true }).lean();
@@ -615,17 +618,14 @@ async function resolveBrandForRow(
   }
 
   const trimmed = row.brandName.trim();
-  const nameKey = trimmed.toLowerCase();
+  const nameKey = normalizeEntityName(trimmed);
 
-  let brand = brands.find((item) => item.name.trim().toLowerCase() === nameKey);
+  let brand = brands.find((item) => normalizeEntityName(item.name) === nameKey);
   if (!brand) {
-    const loaded = await Brand.findOne({
-      name: {
-        $regex: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-      },
-    })
-      .session(session ?? null)
-      .lean();
+    const candidates = await Brand.find().session(session ?? null).lean();
+    const loaded = candidates.find(
+      (item) => normalizeEntityName(item.name) === nameKey
+    );
     if (loaded) {
       if (loaded.isActive === false) {
         await Brand.updateOne(
@@ -687,7 +687,7 @@ export async function previewProductImport(fileBuffer: Buffer) {
       warehouses
     );
     errors.push(...warehouseResolution.errors);
-    const brand = brandByName.get(row.brandName.trim().toLowerCase());
+    const brand = brandByName.get(normalizeEntityName(row.brandName));
     const brandCategory = brand ? "matched" : "new";
     const brandExists = Boolean(brand);
     const brandId = brand ? String(brand._id) : undefined;
@@ -695,7 +695,7 @@ export async function previewProductImport(fileBuffer: Buffer) {
       ? { id: String(brand._id), name: brand.name }
       : undefined;
     const inactiveBrand = !brand
-      ? allBrandByName.get(row.brandName.trim().toLowerCase())
+      ? allBrandByName.get(normalizeEntityName(row.brandName))
       : undefined;
     const reactivatesBrand =
       inactiveBrand && inactiveBrand.isActive === false

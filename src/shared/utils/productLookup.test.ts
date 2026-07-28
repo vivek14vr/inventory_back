@@ -76,6 +76,21 @@ test("overlap lookup returns undefined when nothing matches", () => {
   assert.equal(match, undefined);
 });
 
+test("overlap lookup matches ignoring extra spaces and case", () => {
+  const products: BrandProduct[] = [
+    { name: "11 inch plate", brandId: "b1" },
+  ];
+
+  const match = findProductByBrandLabelOverlap(
+    products,
+    "b1",
+    "11  Inch   Plate",
+    undefined,
+    (p) => p.brandId
+  );
+  assert.equal(match, products[0]);
+});
+
 test("overlap lookup throws when an import row matches multiple products", () => {
   const products: BrandProduct[] = [
     { name: "Paper Bowl", brandId: "b1" },

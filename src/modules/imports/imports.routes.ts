@@ -131,7 +131,7 @@ router.post(
 router.post(
   "/sales/confirm",
   requirePermission(Permission.IMPORTS_SALES, {
-    warehouseIdFrom: "body",
+    allowScopedWithoutWarehouseId: true,
   }),
   asyncHandler(async (req, res) => {
     const input = salesImportConfirmSchema.parse(req.body);

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import * as XLSX from "xlsx";
 import { describe, it } from "node:test";
-import { parseSalesRegisterExcelBuffer } from "./salesImport.service.js";
+import {
+  parseSalesRegisterExcelBuffer,
+  parseWarehouseHintFromNarration,
+} from "./salesImport.service.js";
 
 function buildWorkbookBuffer(rows: unknown[][]): Buffer {
   const sheet = XLSX.utils.aoa_to_sheet(rows);
@@ -9,6 +12,34 @@ function buildWorkbookBuffer(rows: unknown[][]): Buffer {
   XLSX.utils.book_append_sheet(workbook, sheet, "Sales Register");
   return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
+
+describe("parseWarehouseHintFromNarration", () => {
+  it("maps empty narration to goregaon", () => {
+    assert.deepEqual(parseWarehouseHintFromNarration(""), { hint: "goregaon" });
+    assert.deepEqual(parseWarehouseHintFromNarration("   "), { hint: "goregaon" });
+    assert.deepEqual(parseWarehouseHintFromNarration("-"), { hint: "goregaon" });
+    assert.deepEqual(parseWarehouseHintFromNarration("n/a"), { hint: "goregaon" });
+  });
+
+  it("maps narration containing vasai case-insensitively", () => {
+    assert.deepEqual(parseWarehouseHintFromNarration("vasai"), { hint: "vasai" });
+    assert.deepEqual(parseWarehouseHintFromNarration("VASAI Godown"), { hint: "vasai" });
+    assert.deepEqual(parseWarehouseHintFromNarration("to Vasai"), { hint: "vasai" });
+    assert.deepEqual(parseWarehouseHintFromNarration("Vasai / Goregaon"), {
+      hint: "vasai",
+    });
+  });
+
+  it("maps explicit goregaon narration to goregaon", () => {
+    assert.deepEqual(parseWarehouseHintFromNarration("Goregaon"), { hint: "goregaon" });
+    assert.deepEqual(parseWarehouseHintFromNarration("goregoan"), { hint: "goregaon" });
+  });
+
+  it("rejects other narration text", () => {
+    const result = parseWarehouseHintFromNarration("mumbai");
+    assert.ok("error" in result);
+  });
+});
 
 describe("parseSalesRegisterExcelBuffer", () => {
   it("groups invoice headers and product lines from row 4", () => {
@@ -33,8 +64,20 @@ describe("parseSalesRegisterExcelBuffer", () => {
       clientName: "Acme Traders",
       invoiceNumber: "INV-001",
       lines: [
-        { rowNumber: 5, productName: "11 inch plate", quantity: 800 },
-        { rowNumber: 6, productName: "7 inch plate", quantity: 400 },
+        {
+          rowNumber: 5,
+          productName: "11 inch plate",
+          quantity: 800,
+          narrationRaw: "",
+          warehouseHint: "goregaon",
+        },
+        {
+          rowNumber: 6,
+          productName: "7 inch plate",
+          quantity: 400,
+          narrationRaw: "",
+          warehouseHint: "goregaon",
+        },
       ],
     });
     assert.deepEqual(vouchers[1], {
@@ -43,7 +86,15 @@ describe("parseSalesRegisterExcelBuffer", () => {
       sellDate: "26-Jun-25",
       clientName: "Beta Corp",
       invoiceNumber: "INV-002",
-      lines: [{ rowNumber: 8, productName: "11 inch plate", quantity: 100 }],
+      lines: [
+        {
+          rowNumber: 8,
+          productName: "11 inch plate",
+          quantity: 100,
+          narrationRaw: "",
+          warehouseHint: "goregaon",
+        },
+      ],
     });
   });
 
@@ -148,7 +199,58 @@ describe("parseSalesRegisterExcelBuffer", () => {
     assert.equal(vouchers[0].invoiceNumber, "26-27/01327");
     assert.equal(vouchers[0].headerRowNumber, 5);
     assert.deepEqual(vouchers[0].lines, [
-      { rowNumber: 6, productName: "Paper Bag (Kg)", quantity: 30 },
+      {
+        rowNumber: 6,
+        productName: "Paper Bag (Kg)",
+        quantity: 30,
+        narrationRaw: "",
+        warehouseHint: "goregaon",
+      },
+    ]);
+  });
+
+  it("reads Narration for warehouse hint and Quantity after it", () => {
+    const buffer = buildWorkbookBuffer([
+      [
+        "Date",
+        "Particulars",
+        "Buyer",
+        "Voucher Type",
+        "Voucher No.",
+        "Narration",
+        "Quantity",
+      ],
+      ["01-Jul-26", "Acme Traders", "Acme Traders", "Sales", "INV-10", "", ""],
+      ["", "11 inch plate", "", "", "", "vasai", 100],
+      ["", "7 inch plate", "", "", "", "", 50],
+      ["", "Bad line", "", "", "", "mumbai", 10],
+    ]);
+
+    const vouchers = parseSalesRegisterExcelBuffer(buffer);
+    assert.equal(vouchers.length, 1);
+    assert.deepEqual(vouchers[0].lines, [
+      {
+        rowNumber: 3,
+        productName: "11 inch plate",
+        quantity: 100,
+        narrationRaw: "vasai",
+        warehouseHint: "vasai",
+      },
+      {
+        rowNumber: 4,
+        productName: "7 inch plate",
+        quantity: 50,
+        narrationRaw: "",
+        warehouseHint: "goregaon",
+      },
+      {
+        rowNumber: 5,
+        productName: "Bad line",
+        quantity: 10,
+        narrationRaw: "mumbai",
+        warehouseNarrationError:
+          'Narration must be empty (Goregaon) or contain "vasai" / "goregaon". Got "mumbai"',
+      },
     ]);
   });
 

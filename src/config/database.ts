@@ -3,21 +3,30 @@ import { env } from "./env.js";
 
 async function backfillProductNameNormalized(): Promise<void> {
   const { Product } = await import("../models/Product.js");
-  const missing = await Product.find({
-    $or: [{ nameNormalized: { $exists: false } }, { nameNormalized: "" }],
-  }).select("name");
+  const { normalizeProductName } = await import("../shared/utils/productName.js");
+  const products = await Product.find().select("name nameNormalized");
 
-  if (missing.length === 0) return;
+  const ops = products
+    .map((doc) => {
+      const next = normalizeProductName(doc.name);
+      if (doc.nameNormalized === next) return null;
+      return {
+        updateOne: {
+          filter: { _id: doc._id },
+          update: { $set: { nameNormalized: next } },
+        },
+      };
+    })
+    .filter((op): op is NonNullable<typeof op> => op != null);
 
-  const ops = missing.map((doc) => ({
-    updateOne: {
-      filter: { _id: doc._id },
-      update: { $set: { nameNormalized: doc.name.trim().toLowerCase() } },
-    },
-  }));
+  if (ops.length === 0) return;
 
-  await Product.bulkWrite(ops);
-  console.log(`Backfilled nameNormalized on ${missing.length} product(s)`);
+  await Product.bulkWrite(ops, { ordered: false }).catch((err: unknown) => {
+    // Duplicate keys after space-insensitive normalize mean legacy near-duplicates exist;
+    // uniqueness is still enforced in application code on create/update.
+    console.warn("nameNormalized backfill had conflicts:", err);
+  });
+  console.log(`Backfilled nameNormalized on ${ops.length} product(s)`);
 }
 
 async function removeInvalidInvoiceMovementIndex(): Promise<void> {

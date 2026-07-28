@@ -12,7 +12,7 @@ import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
 import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
-import { normalizeProductName } from "../../shared/utils/productName.js";
+import { normalizeEntityName, normalizeProductName } from "../../shared/utils/productName.js";
 import { assertPermission } from "../../shared/utils/permissions.js";
 import { Permission } from "../../shared/constants/permissions.js";
 import { createBrand } from "../brands/brands.service.js";
@@ -31,12 +31,19 @@ type SalesRegisterLayout = {
   colParticulars: number;
   colVoucherNo: number;
   colQuantity: number;
+  /** Narration / warehouse hint column (F). Undefined when older sheets omit it. */
+  colNarration?: number;
 };
+
+export type SalesWarehouseHint = "vasai" | "goregaon";
 
 export type ParsedSalesLine = {
   rowNumber: number;
   productName: string;
   quantity: number;
+  warehouseHint?: SalesWarehouseHint;
+  narrationRaw: string;
+  warehouseNarrationError?: string;
 };
 
 export type ParsedSalesVoucher = {
@@ -53,6 +60,9 @@ export type SalesImportLinePreview = ParsedSalesLine & {
   brandCategory: "matched" | "new";
   category: "matched" | "unmatched";
   errors: string[];
+  warehouseId?: string;
+  warehouseName?: string;
+  warehouseCode?: string;
   matchedBrand?: {
     id: string;
     name: string;
@@ -91,6 +101,7 @@ export type SalesImportResultLine = {
   sellDate: string;
   productName: string;
   quantity: number;
+  warehouseId?: string;
   action?: "merge" | "create";
   brandAction?: "merge" | "create";
   mergeTargetBrandId?: string;
@@ -251,6 +262,10 @@ function detectSalesRegisterLayout(matrix: unknown[][]): SalesRegisterLayout {
     const colQuantity =
       findHeaderColumn(row, (label) => ["quantity", "qty", "qnty"].includes(label)) ??
       DEFAULT_COL_QUANTITY;
+    const colNarration = findHeaderColumn(
+      row,
+      (label) => label === "narration" || label.includes("narration")
+    );
 
     return {
       headerRowIndex: i,
@@ -259,12 +274,60 @@ function detectSalesRegisterLayout(matrix: unknown[][]): SalesRegisterLayout {
       colParticulars,
       colVoucherNo,
       colQuantity,
+      colNarration,
     };
   }
 
   throw new BadRequestError(
     "Could not find sales register header row. Expected columns: Date, Particulars, Voucher No., and Quantity."
   );
+}
+
+/** Empty / goregaon → Goregaon. Contains "vasai" → Vasai (checked first). Anything else → invalid. */
+export function parseWarehouseHintFromNarration(
+  raw: string
+): { hint: SalesWarehouseHint } | { error: string } {
+  const trimmed = raw.trim();
+  const normalized = trimmed.toLowerCase().replace(/\s+/g, " ");
+  // Vasai wins if mentioned (even alongside other text)
+  if (normalized.includes("vasai")) {
+    return { hint: "vasai" };
+  }
+  // Blank, placeholders, or explicit Goregaon → Goregaon warehouse
+  if (
+    !normalized ||
+    normalized === "-" ||
+    normalized === "—" ||
+    normalized === "." ||
+    normalized === "n/a" ||
+    normalized === "na" ||
+    normalized === "none" ||
+    normalized === "nil" ||
+    normalized.includes("goregaon") ||
+    normalized.includes("goregoan") // common misspelling
+  ) {
+    return { hint: "goregaon" };
+  }
+  return {
+    error: `Narration must be empty (Goregaon) or contain "vasai" / "goregaon". Got "${trimmed}"`,
+  };
+}
+
+function findWarehouseByHint(
+  warehouses: Array<{ _id: Types.ObjectId; name: string; code: string }>,
+  hint: SalesWarehouseHint
+): { _id: Types.ObjectId; name: string; code: string } | undefined {
+  const needle = hint.toLowerCase().replace(/\s+/g, "");
+  return warehouses.find((warehouse) => {
+    const name = normalizeEntityName(warehouse.name);
+    const code = normalizeEntityName(warehouse.code);
+    return (
+      name === needle ||
+      code === needle ||
+      name.includes(needle) ||
+      code.includes(needle)
+    );
+  });
 }
 
 function isCancelledClient(name: string): boolean {
@@ -276,7 +339,7 @@ function rowIsBlank(row: unknown[]): boolean {
   return row.every((cell) => cellString(cell) === "");
 }
 
-/** Column map: A=date, B=particulars (client or product), C-D=ignored, E=voucher no., F=quantity (product rows only). */
+/** Column map: A=date, B=particulars, E=voucher no., F=narration (warehouse), G=quantity. */
 function assertSalesRegisterFile(matrix: unknown[][]): void {
   for (let i = 0; i < Math.min(matrix.length, 6); i++) {
     const row = matrix[i] ?? [];
@@ -315,6 +378,7 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
     colParticulars,
     colVoucherNo,
     colQuantity,
+    colNarration,
   } = layout;
 
   if (matrix.length <= dataStartRowIndex) {
@@ -365,10 +429,18 @@ export function parseSalesRegisterExcelBuffer(buffer: Buffer): ParsedSalesVouche
     if (!productName) continue;
     if (quantity == null || quantity < 1) continue;
 
+    const narrationRaw =
+      colNarration != null ? cellString(row[colNarration]) : "";
+    const warehouseParsed = parseWarehouseHintFromNarration(narrationRaw);
+
     current.lines.push({
       rowNumber: excelRowNumber,
       productName,
       quantity,
+      narrationRaw,
+      ...("hint" in warehouseParsed
+        ? { warehouseHint: warehouseParsed.hint }
+        : { warehouseNarrationError: warehouseParsed.error }),
     });
   }
 
@@ -402,6 +474,9 @@ function validateLineOnly(line: ParsedSalesLine): string[] {
   if (!Number.isFinite(line.quantity) || line.quantity < 1) {
     errors.push("Quantity must be a positive whole number (units)");
   }
+  if (line.warehouseNarrationError) {
+    errors.push(line.warehouseNarrationError);
+  }
   return errors;
 }
 
@@ -413,7 +488,7 @@ async function loadSalesImportContext() {
   const clients = await Client.find({ isActive: true }).sort({ name: 1 }).lean();
   const brandIdToName = new Map(brands.map((brand) => [String(brand._id), brand.name]));
   const brandByName = new Map(
-    brands.map((brand) => [brand.name.trim().toLowerCase(), brand])
+    brands.map((brand) => [normalizeEntityName(brand.name), brand])
   );
 
   return {
@@ -459,9 +534,10 @@ function inferBrandNameForSalesLine(
   const sortedBrands = Array.from(brandByName.values()).sort(
     (a, b) => b.name.length - a.name.length
   );
+  const haystack = normalizeEntityName(trimmed);
   for (const brand of sortedBrands) {
-    const needle = brand.name.trim().toLowerCase();
-    if (trimmed.toLowerCase().endsWith(needle)) {
+    const needle = normalizeEntityName(brand.name);
+    if (needle && haystack.endsWith(needle)) {
       return brand.name;
     }
   }
@@ -481,16 +557,36 @@ export async function previewSalesImport(fileBuffer: Buffer) {
     existingClients,
   } = await loadSalesImportContext();
 
+  const warehouses = await Warehouse.find({ isActive: true })
+    .select("name code")
+    .lean();
+
   const clientByName = new Map(
-    existingClients.map((client) => [client.name.trim().toLowerCase(), client])
+    existingClients.map((client) => [normalizeEntityName(client.name), client])
   );
 
   const vouchers: SalesImportVoucherPreview[] = parsedVouchers.map((voucher) => {
     const voucherErrors = validateVoucher(voucher);
-    const matchedClient = clientByName.get(voucher.clientName.trim().toLowerCase());
+    const matchedClient = clientByName.get(normalizeEntityName(voucher.clientName));
     const lines: SalesImportLinePreview[] = voucher.lines.map((line) => {
       const lineErrors = validateLineOnly(line);
       let matchedProduct: SalesImportLinePreview["matchedProduct"];
+      let warehouseId: string | undefined;
+      let warehouseName: string | undefined;
+      let warehouseCode: string | undefined;
+
+      if (line.warehouseHint) {
+        const warehouse = findWarehouseByHint(warehouses, line.warehouseHint);
+        if (!warehouse) {
+          lineErrors.push(
+            `Warehouse "${line.warehouseHint}" not found or inactive. Import cannot continue until Vasai and Goregaon warehouses exist.`
+          );
+        } else {
+          warehouseId = String(warehouse._id);
+          warehouseName = warehouse.name;
+          warehouseCode = warehouse.code;
+        }
+      }
 
       if (lineErrors.length === 0) {
         try {
@@ -515,7 +611,7 @@ export async function previewSalesImport(fileBuffer: Buffer) {
         matchedProduct
       );
       const matchedBrandRecord = brandName
-        ? brandByName.get(brandName.trim().toLowerCase())
+        ? brandByName.get(normalizeEntityName(brandName))
         : undefined;
       const matchedBrand = matchedBrandRecord
         ? { id: String(matchedBrandRecord._id), name: matchedBrandRecord.name }
@@ -527,6 +623,9 @@ export async function previewSalesImport(fileBuffer: Buffer) {
         brandCategory: matchedBrand ? "matched" : "new",
         category: matchedProduct ? "matched" : "unmatched",
         errors: lineErrors,
+        warehouseId,
+        warehouseName,
+        warehouseCode,
         matchedBrand,
         matchedProduct,
       };
@@ -595,21 +694,21 @@ async function resolveBrandForSalesLine(
   if (!trimmed) {
     throw new BadRequestError("Brand name is required to create a new brand");
   }
-  const nameKey = trimmed.toLowerCase();
+  const nameKey = normalizeEntityName(trimmed);
 
-  const existingActive = brands.find((item) => item.name.trim().toLowerCase() === nameKey);
+  const existingActive = brands.find(
+    (item) => normalizeEntityName(item.name) === nameKey
+  );
   if (existingActive) {
     throw new BadRequestError(
       `Brand "${trimmed}" already exists. Use "Use existing brand" to merge into it instead.`
     );
   }
 
-  const inactive = await Brand.findOne({
-    name: {
-      $regex: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-    },
-    isActive: false,
-  }).lean();
+  const inactiveCandidates = await Brand.find({ isActive: false }).lean();
+  const inactive = inactiveCandidates.find(
+    (item) => normalizeEntityName(item.name) === nameKey
+  );
   if (inactive) {
     await Brand.updateOne({ _id: inactive._id }, { $set: { isActive: true } });
     brands.push({ ...inactive, isActive: true });
@@ -666,9 +765,20 @@ async function resolveClientForVoucher(
     throw new BadRequestError("Client name is required to create a new client");
   }
 
-  const existing = await Client.findOne({
-    name: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-  }).lean();
+  const nameKey = normalizeEntityName(trimmed);
+  const existingFromCache = clients.find(
+    (item) => normalizeEntityName(item.name) === nameKey
+  );
+  if (existingFromCache) {
+    throw new BadRequestError(
+      `Client "${trimmed}" already exists. Use "Use existing client" to merge into it instead.`
+    );
+  }
+
+  const existingCandidates = await Client.find().lean();
+  const existing = existingCandidates.find(
+    (item) => normalizeEntityName(item.name) === nameKey
+  );
   if (existing) {
     if (existing.isActive === false) {
       await Client.updateOne(
@@ -841,9 +951,11 @@ type SalesImportVoucherLineValidation = {
     mergeTargetBrandId?: string;
     action: "merge" | "create";
     mergeTargetProductId?: string;
+    warehouseId: string;
   };
   line: SalesImportConfirmInput["vouchers"][number]["lines"][number];
   lineErrors: string[];
+  ignored: boolean;
 };
 
 function rejectEntireVoucher(
@@ -859,7 +971,8 @@ function rejectEntireVoucher(
   lineResults: SalesImportResultLine[],
   voucherResults: SalesImportResultVoucher[]
 ): number {
-  const lineFailures = validations
+  const active = validations.filter((entry) => !entry.ignored);
+  const lineFailures = active
     .filter((entry) => entry.lineErrors.length > 0)
     .map(
       (entry) => `Row ${entry.baseLine.rowNumber}: ${entry.lineErrors.join("; ")}`
@@ -870,7 +983,16 @@ function rejectEntireVoucher(
       ? `One or more products failed — entire invoice rejected. ${lineFailures.join(" · ")}`
       : "Entire invoice rejected — no stock out recorded");
 
+  let failed = 0;
   for (const entry of validations) {
+    if (entry.ignored) {
+      lineResults.push({
+        ...entry.baseLine,
+        status: "SKIPPED",
+        message: "Ignored by user",
+      });
+      continue;
+    }
     const message =
       entry.lineErrors.length > 0
         ? entry.lineErrors.join("; ")
@@ -880,6 +1002,7 @@ function rejectEntireVoucher(
       status: "FAILED",
       message,
     });
+    failed++;
   }
 
   voucherResults.push({
@@ -888,23 +1011,42 @@ function rejectEntireVoucher(
     message: summary,
   });
 
-  return validations.length;
+  return failed;
 }
 
 export async function confirmSalesImport(input: SalesImportConfirmInput, user: AuthUser) {
   const lineCount = input.vouchers.reduce((sum, voucher) => sum + voucher.lines.length, 0);
   assertImportRowCount(lineCount, "Sales import confirm");
 
-  const warehouseId = input.warehouseId.trim();
-  if (!Types.ObjectId.isValid(warehouseId)) {
-    throw new BadRequestError("Invalid warehouse ID");
+  const warehouseIds = [
+    ...new Set(
+      input.vouchers.flatMap((voucher) =>
+        voucher.lines.filter((line) => !line.ignore).map((line) => line.warehouseId.trim())
+      )
+    ),
+  ];
+  if (warehouseIds.length === 0) {
+    throw new BadRequestError("No product lines to import (all lines ignored)");
   }
 
-  assertPermission(user, Permission.IMPORTS_SALES, warehouseId);
+  for (const warehouseId of warehouseIds) {
+    if (!Types.ObjectId.isValid(warehouseId)) {
+      throw new BadRequestError(`Invalid warehouse ID: ${warehouseId}`);
+    }
+    assertPermission(user, Permission.IMPORTS_SALES, warehouseId);
+  }
 
-  const warehouse = await Warehouse.findOne({ _id: warehouseId, isActive: true }).lean();
-  if (!warehouse) {
-    throw new NotFoundError("Warehouse not found or inactive");
+  const warehouseDocs = await Warehouse.find({
+    _id: { $in: warehouseIds.map((id) => new Types.ObjectId(id)) },
+    isActive: true,
+  }).lean();
+  const warehouseById = new Map(
+    warehouseDocs.map((warehouse) => [String(warehouse._id), warehouse])
+  );
+  for (const warehouseId of warehouseIds) {
+    if (!warehouseById.has(warehouseId)) {
+      throw new NotFoundError(`Warehouse not found or inactive: ${warehouseId}`);
+    }
   }
 
   const { allProducts } = await loadSalesImportContext();
@@ -920,6 +1062,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
   let createdProductCount = 0;
   let createdBrandCount = 0;
   let createdClientCount = 0;
+  const usedWarehouseIds = new Set<string>();
 
   for (const voucher of input.vouchers) {
     const draftVoucher = {
@@ -944,6 +1087,36 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     let resolvedClientName = draftVoucher.clientName;
     let voucherCreatedClientId: string | undefined;
 
+    const activeLines = voucher.lines.filter((line) => !line.ignore);
+    if (activeLines.length === 0) {
+      for (const line of voucher.lines) {
+        lineResults.push({
+          rowNumber: line.rowNumber,
+          voucherIndex: draftVoucher.voucherIndex,
+          headerRowNumber: draftVoucher.headerRowNumber,
+          clientName: draftVoucher.clientName,
+          invoiceNumber: draftVoucher.invoiceNumber,
+          sellDate: draftVoucher.sellDate,
+          productName: line.productName.trim(),
+          quantity: line.quantity,
+          warehouseId: line.warehouseId.trim(),
+          status: "SKIPPED",
+          message: "Ignored by user",
+        });
+      }
+      voucherResults.push({
+        voucherIndex: draftVoucher.voucherIndex,
+        headerRowNumber: draftVoucher.headerRowNumber,
+        clientName: draftVoucher.clientName,
+        invoiceNumber: draftVoucher.invoiceNumber,
+        sellDate: draftVoucher.sellDate,
+        status: "SUCCESS",
+        message: "All product lines ignored — nothing imported",
+        movementCount: 0,
+      });
+      continue;
+    }
+
     if (voucherErrors.length === 0) {
       try {
         const resolvedClient = await resolveClientForVoucher(draftVoucher, user, clientDocs);
@@ -966,6 +1139,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     };
 
     const lineValidations: SalesImportVoucherLineValidation[] = voucher.lines.map((line) => {
+      const warehouseId = line.warehouseId.trim();
+      const ignored = Boolean(line.ignore);
       const baseLine = {
         rowNumber: line.rowNumber,
         ...baseVoucher,
@@ -976,38 +1151,32 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         mergeTargetBrandId: line.mergeTargetBrandId,
         action: line.action,
         mergeTargetProductId: line.mergeTargetProductId,
+        warehouseId,
       };
 
-      const lineErrors = [...voucherErrors];
-      if (!baseLine.productName) lineErrors.push("Product name is required");
-      if (!baseLine.brandName) lineErrors.push("Brand name is required");
-      if (!Number.isFinite(baseLine.quantity) || baseLine.quantity < 1) {
-        lineErrors.push("Quantity must be at least 1 unit");
-      }
-      if (line.brandAction === "merge" && !line.mergeTargetBrandId) {
-        lineErrors.push("Select a brand to merge into");
-      }
-      if (line.action === "merge" && !line.mergeTargetProductId) {
-        lineErrors.push("Select a product to merge into");
+      const lineErrors = ignored ? [] : [...voucherErrors];
+      if (!ignored) {
+        if (!baseLine.productName) lineErrors.push("Product name is required");
+        if (!baseLine.brandName) lineErrors.push("Brand name is required");
+        if (!Number.isFinite(baseLine.quantity) || baseLine.quantity < 1) {
+          lineErrors.push("Quantity must be at least 1 unit");
+        }
+        if (!Types.ObjectId.isValid(warehouseId) || !warehouseById.has(warehouseId)) {
+          lineErrors.push("Warehouse not found or inactive");
+        }
+        if (line.brandAction === "merge" && !line.mergeTargetBrandId) {
+          lineErrors.push("Select a brand to merge into");
+        }
+        if (line.action === "merge" && !line.mergeTargetProductId) {
+          lineErrors.push("Select a product to merge into");
+        }
       }
 
-      return { baseLine, line, lineErrors };
+      return { baseLine, line, lineErrors, ignored };
     });
 
-    if (lineValidations.length === 0) {
-      await rollbackSalesImportCreates({
-        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
-      });
-      voucherResults.push({
-        ...baseVoucher,
-        status: "FAILED",
-        message: "No product lines to import",
-      });
-      continue;
-    }
-
     const hasValidationFailure = lineValidations.some(
-      (entry) => entry.lineErrors.length > 0
+      (entry) => !entry.ignored && entry.lineErrors.length > 0
     );
     if (hasValidationFailure) {
       await rollbackSalesImportCreates({
@@ -1023,18 +1192,33 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       continue;
     }
 
-    const duplicateInvoice = await StockMovement.exists({
-      type: StockMovementType.STOCK_OUT,
-      dispatchType: DispatchType.DIRECT_SELLING,
-      warehouseId: new Types.ObjectId(warehouseId),
-      invoiceNumber: exactCaseInsensitiveRegex(baseVoucher.invoiceNumber),
-      clientName: exactCaseInsensitiveRegex(baseVoucher.clientName),
-    });
-    if (duplicateInvoice) {
+    const warehouseGroups = new Map<string, SalesImportVoucherLineValidation[]>();
+    for (const entry of lineValidations) {
+      if (entry.ignored) continue;
+      const group = warehouseGroups.get(entry.baseLine.warehouseId) ?? [];
+      group.push(entry);
+      warehouseGroups.set(entry.baseLine.warehouseId, group);
+    }
+
+    let duplicateMessage = "";
+    for (const [warehouseId] of warehouseGroups) {
+      const duplicateInvoice = await StockMovement.exists({
+        type: StockMovementType.STOCK_OUT,
+        dispatchType: DispatchType.DIRECT_SELLING,
+        warehouseId: new Types.ObjectId(warehouseId),
+        invoiceNumber: exactCaseInsensitiveRegex(baseVoucher.invoiceNumber),
+        clientName: exactCaseInsensitiveRegex(baseVoucher.clientName),
+      });
+      if (duplicateInvoice) {
+        const warehouse = warehouseById.get(warehouseId)!;
+        duplicateMessage = `Invoice ${baseVoucher.invoiceNumber} for ${baseVoucher.clientName} was already imported at ${warehouse.name}`;
+        break;
+      }
+    }
+    if (duplicateMessage) {
       await rollbackSalesImportCreates({
         clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
       });
-      const duplicateMessage = `Invoice ${baseVoucher.invoiceNumber} for ${baseVoucher.clientName} was already imported at this warehouse`;
       failedCount += rejectEntireVoucher(
         baseVoucher,
         lineValidations,
@@ -1055,75 +1239,96 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     const voucherCreatedBrandIds: string[] = [];
 
     try {
-      const batchItems: Array<{ productId: string; brandId: string; quantity: number }> = [];
+      const resolvedByWarehouse = new Map<
+        string,
+        Array<{ productId: string; brandId: string; quantity: number }>
+      >();
 
-      for (const { baseLine, line } of lineValidations) {
-        const resolvedBrand = await resolveBrandForSalesLine(
-          {
-            brandName: baseLine.brandName,
-            brandAction: line.brandAction,
-            mergeTargetBrandId: line.mergeTargetBrandId,
-          },
-          user,
-          brandDocs
-        );
-        if (resolvedBrand.created) {
-          createdBrandCount++;
-          voucherCreatedBrandIds.push(resolvedBrand.brandId);
-        }
-
-        const resolvedProduct = await resolveSalesImportLineProduct(
-          line,
-          resolvedBrand.brandId,
-          createdProductCache,
-          productById
-        );
-        if (resolvedProduct.created) {
-          createdProductCount++;
-          voucherCreatedProductIds.push(resolvedProduct.productId);
-          await AuditLog.create({
-            action: "PRODUCT_CREATED",
-            entity: "Product",
-            entityId: new Types.ObjectId(resolvedProduct.productId),
-            userId: new Types.ObjectId(user.id),
-            metadata: {
-              name: baseLine.productName,
-              brandId: resolvedProduct.brandId,
-              source: "sales_import",
+      for (const [warehouseId, group] of warehouseGroups) {
+        const batchItems: Array<{ productId: string; brandId: string; quantity: number }> = [];
+        for (const { baseLine, line } of group) {
+          const resolvedBrand = await resolveBrandForSalesLine(
+            {
+              brandName: baseLine.brandName,
+              brandAction: line.brandAction,
+              mergeTargetBrandId: line.mergeTargetBrandId,
             },
+            user,
+            brandDocs
+          );
+          if (resolvedBrand.created) {
+            createdBrandCount++;
+            voucherCreatedBrandIds.push(resolvedBrand.brandId);
+          }
+
+          const resolvedProduct = await resolveSalesImportLineProduct(
+            line,
+            resolvedBrand.brandId,
+            createdProductCache,
+            productById
+          );
+          if (resolvedProduct.created) {
+            createdProductCount++;
+            voucherCreatedProductIds.push(resolvedProduct.productId);
+            await AuditLog.create({
+              action: "PRODUCT_CREATED",
+              entity: "Product",
+              entityId: new Types.ObjectId(resolvedProduct.productId),
+              userId: new Types.ObjectId(user.id),
+              metadata: {
+                name: baseLine.productName,
+                brandId: resolvedProduct.brandId,
+                source: "sales_import",
+              },
+            });
+          }
+
+          batchItems.push({
+            productId: resolvedProduct.productId,
+            brandId: resolvedProduct.brandId,
+            quantity: baseLine.quantity,
           });
         }
-
-        batchItems.push({
-          productId: resolvedProduct.productId,
-          brandId: resolvedProduct.brandId,
-          quantity: baseLine.quantity,
-        });
+        resolvedByWarehouse.set(warehouseId, mergeBatchItems(batchItems));
       }
 
-      const mergedItems = mergeBatchItems(batchItems);
+      let movementCount = 0;
+      let lastClientName = baseVoucher.clientName;
+      for (const [warehouseId, items] of resolvedByWarehouse) {
+        const batchResult = await stockService.stockOutBatch(
+          {
+            warehouseId,
+            clientName: baseVoucher.clientName,
+            invoiceNumber: baseVoucher.invoiceNumber,
+            notes,
+            items: items.map((item) => ({
+              brandId: item.brandId,
+              productId: item.productId,
+              quantity: item.quantity,
+            })),
+          },
+          user,
+          { warehousePermission: Permission.IMPORTS_SALES }
+        );
+        movementCount += batchResult.movements.length;
+        lastClientName = batchResult.clientName;
+        usedWarehouseIds.add(warehouseId);
+      }
 
-      const batchResult = await stockService.stockOutBatch(
-        {
-          warehouseId,
-          clientName: baseVoucher.clientName,
-          invoiceNumber: baseVoucher.invoiceNumber,
-          notes,
-          items: mergedItems.map((item) => ({
-            brandId: item.brandId,
-            productId: item.productId,
-            quantity: item.quantity,
-          })),
-        },
-        user,
-        { warehousePermission: Permission.IMPORTS_SALES }
-      );
-
-      for (const { baseLine } of lineValidations) {
+      for (const entry of lineValidations) {
+        if (entry.ignored) {
+          lineResults.push({
+            ...entry.baseLine,
+            status: "SKIPPED",
+            message: "Ignored by user",
+          });
+          continue;
+        }
+        const warehouse = warehouseById.get(entry.baseLine.warehouseId);
         lineResults.push({
-          ...baseLine,
+          ...entry.baseLine,
           status: "SUCCESS",
-          message: `Stock out recorded (${batchResult.clientName})`,
+          message: `Stock out recorded at ${warehouse?.name ?? "warehouse"} (${lastClientName})`,
         });
         successCount++;
       }
@@ -1131,7 +1336,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       voucherResults.push({
         ...baseVoucher,
         status: "SUCCESS",
-        movementCount: batchResult.movements.length,
+        movementCount,
       });
     } catch (err) {
       await rollbackSalesImportCreates({
@@ -1150,14 +1355,36 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     }
   }
 
+  const warehousesUsed = [...usedWarehouseIds]
+    .map((id) => warehouseById.get(id))
+    .filter((warehouse): warehouse is NonNullable<typeof warehouse> => Boolean(warehouse))
+    .map((warehouse) => ({
+      id: String(warehouse._id),
+      name: warehouse.name,
+      code: warehouse.code,
+    }));
+
+  // Prefer warehouses touched by successful stock-outs; fall back to all requested.
+  const warehouses =
+    warehousesUsed.length > 0
+      ? warehousesUsed
+      : warehouseIds.map((id) => {
+          const warehouse = warehouseById.get(id)!;
+          return {
+            id: String(warehouse._id),
+            name: warehouse.name,
+            code: warehouse.code,
+          };
+        });
+
   await AuditLog.create({
     action: "SALES_IMPORT",
     entity: "StockMovement",
     userId: user.id,
     metadata: {
       fileName: input.fileName,
-      warehouseId,
-      warehouseName: warehouse.name,
+      warehouseIds,
+      warehouseNames: warehouses.map((warehouse) => warehouse.name),
       voucherCount: input.vouchers.length,
       successCount,
       failedCount,
@@ -1169,11 +1396,8 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
 
   return {
     fileName: input.fileName,
-    warehouse: {
-      id: String(warehouse._id),
-      name: warehouse.name,
-      code: warehouse.code,
-    },
+    warehouse: warehouses[0]!,
+    warehouses,
     totalVouchers: input.vouchers.length,
     totalLines: lineResults.length,
     successCount,

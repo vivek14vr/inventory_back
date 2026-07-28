@@ -1,8 +1,9 @@
 import mongoose, { Schema, type Document, type Model, Types } from "mongoose";
+import { normalizeProductName } from "../shared/utils/productName.js";
 
 export interface IProduct extends Document {
   name: string;
-  /** Case-insensitive duplicate check key for primary name within a brand. */
+  /** Case-insensitive, space-insensitive duplicate check key for primary name within a brand. */
   nameNormalized: string;
   secondaryName?: string;
   brandId: Types.ObjectId;
@@ -41,7 +42,7 @@ productSchema.index({ brandId: 1, nameNormalized: 1 }, { unique: true });
 
 productSchema.pre("validate", function () {
   if (this.name) {
-    this.nameNormalized = this.name.trim().toLowerCase();
+    this.nameNormalized = normalizeProductName(this.name);
   }
 });
 

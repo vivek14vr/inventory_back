@@ -5,6 +5,7 @@ import { Client } from "../../models/Client.js";
 import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
+import { normalizeEntityName } from "../../shared/utils/productName.js";
 import {
   createClient,
   updateClient,
@@ -105,7 +106,7 @@ export function parseClientExcelBuffer(buffer: Buffer): ParsedClientImportRow[] 
     const secondaryRaw = secondaryKey ? String(row[secondaryKey] ?? "").trim() : "";
     const secondaryName = secondaryRaw || undefined;
 
-    const normalizedPrimary = primaryName.toLowerCase();
+    const normalizedPrimary = normalizeEntityName(primaryName);
     const duplicateRow = seenPrimary.get(normalizedPrimary);
     if (duplicateRow != null) {
       parsed.push({
@@ -154,17 +155,17 @@ export async function previewClientImport(fileBuffer: Buffer) {
   const activeByName = new Map(
     allClients
       .filter((client) => client.isActive !== false)
-      .map((client) => [client.name.trim().toLowerCase(), client])
+      .map((client) => [normalizeEntityName(client.name), client])
   );
   const inactiveByName = new Map(
     allClients
       .filter((client) => client.isActive === false)
-      .map((client) => [client.name.trim().toLowerCase(), client])
+      .map((client) => [normalizeEntityName(client.name), client])
   );
 
   const seenPrimary = new Map<string, number>();
   const previewRows: ClientImportPreviewRow[] = parsedRows.map((row) => {
-    const normalized = row.primaryName.trim().toLowerCase();
+    const normalized = normalizeEntityName(row.primaryName);
     const duplicateRow =
       normalized && seenPrimary.has(normalized) ? seenPrimary.get(normalized) : undefined;
     if (normalized && !duplicateRow) {
@@ -234,7 +235,7 @@ export async function confirmClientImport(input: ClientImportConfirmInput, user:
       errors.push("Select a client to merge into");
     }
 
-    const normalized = base.primaryName.toLowerCase();
+    const normalized = normalizeEntityName(base.primaryName);
     if (normalized && seenPrimary.has(normalized)) {
       errors.push(
         `Duplicate primary name (same as row ${seenPrimary.get(normalized)})`
