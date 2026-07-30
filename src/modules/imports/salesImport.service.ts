@@ -505,6 +505,7 @@ async function loadSalesImportContext() {
   const brands = await Brand.find({ isActive: true }).sort({ name: 1 }).lean();
   const allBrands = await Brand.find().lean();
   const clients = await Client.find({ isActive: true }).sort({ name: 1 }).lean();
+  const allClients = await Client.find().lean();
   const brandIdToName = new Map(brands.map((brand) => [String(brand._id), brand.name]));
   const brandByName = new Map(
     brands.map((brand) => [normalizeEntityName(brand.name), brand])
@@ -515,6 +516,7 @@ async function loadSalesImportContext() {
     allProducts,
     brands,
     allBrands,
+    allClients,
     brandByName,
     brandIdToName,
     existingBrands: brands.map((brand) => ({
@@ -780,7 +782,12 @@ async function resolveClientForVoucher(
     clientSecondaryName?: string;
   },
   user: AuthUser,
-  clients: Array<{ _id: Types.ObjectId; name: string; secondaryName?: string }>
+  clients: Array<{
+    _id: Types.ObjectId;
+    name: string;
+    secondaryName?: string;
+    isActive?: boolean;
+  }>
 ): Promise<{ clientName: string; created: boolean; clientId?: string }> {
   if (voucher.clientAction === "merge") {
     const targetId = voucher.mergeTargetClientId;
@@ -806,38 +813,40 @@ async function resolveClientForVoucher(
     throw new BadRequestError("Client name is required to create a new client");
   }
 
+  // Find-or-create by space-insensitive name so "Create new" still reuses an
+  // existing client instead of failing the whole invoice.
   const nameKey = normalizeEntityName(trimmed);
-  const existingFromCache = clients.find(
-    (item) => normalizeEntityName(item.name) === nameKey
+  const existingActive = clients.find(
+    (item) => item.isActive !== false && normalizeEntityName(item.name) === nameKey
   );
-  if (existingFromCache) {
-    throw new BadRequestError(
-      `Client "${trimmed}" already exists. Use "Use existing client" to merge into it instead.`
-    );
+  if (existingActive) {
+    return {
+      clientName: existingActive.name,
+      created: false,
+      clientId: String(existingActive._id),
+    };
   }
 
-  const existingCandidates = await Client.find().lean();
-  const existing = existingCandidates.find(
-    (item) => normalizeEntityName(item.name) === nameKey
+  const inactive = clients.find(
+    (item) => item.isActive === false && normalizeEntityName(item.name) === nameKey
   );
-  if (existing) {
-    if (existing.isActive === false) {
-      await Client.updateOne(
-        { _id: existing._id },
-        {
-          $set: {
-            isActive: true,
-            ...(voucher.clientSecondaryName?.trim()
-              ? { secondaryName: voucher.clientSecondaryName.trim() }
-              : {}),
-          },
-        }
-      );
-      return { clientName: existing.name, created: false, clientId: String(existing._id) };
-    }
-    throw new BadRequestError(
-      `Client "${trimmed}" already exists. Use "Use existing client" to merge into it instead.`
+  if (inactive) {
+    await Client.updateOne(
+      { _id: inactive._id },
+      {
+        $set: {
+          isActive: true,
+          ...(voucher.clientSecondaryName?.trim()
+            ? { secondaryName: voucher.clientSecondaryName.trim() }
+            : {}),
+        },
+      }
     );
+    inactive.isActive = true;
+    if (voucher.clientSecondaryName?.trim()) {
+      inactive.secondaryName = voucher.clientSecondaryName.trim();
+    }
+    return { clientName: inactive.name, created: false, clientId: String(inactive._id) };
   }
 
   const created = await createClient({
@@ -849,6 +858,7 @@ async function resolveClientForVoucher(
     _id: new Types.ObjectId(created.id),
     name: created.name,
     secondaryName: created.secondaryName,
+    isActive: true,
   });
   await AuditLog.create({
     action: "CLIENT_CREATED",
@@ -1126,13 +1136,18 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     }
   }
 
-  const { allProducts, allBrands } = await loadSalesImportContext();
+  const { allProducts, allBrands, allClients } = await loadSalesImportContext();
   const productById = new Map(allProducts.map((product) => [String(product._id), product]));
   const createdProductCache = new Map<string, string>();
   const brandDocs: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }> = [
     ...allBrands,
   ];
-  const clientDocs: Array<{ _id: Types.ObjectId; name: string; secondaryName?: string }> = [];
+  const clientDocs: Array<{
+    _id: Types.ObjectId;
+    name: string;
+    secondaryName?: string;
+    isActive?: boolean;
+  }> = [...allClients];
 
   const lineResults: SalesImportResultLine[] = [];
   const voucherResults: SalesImportResultVoucher[] = [];
