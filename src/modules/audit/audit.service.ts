@@ -8,12 +8,13 @@ import {
   mongoSort,
 } from "../../shared/pagination/pagination.js";
 import type { AuditLogQuery } from "./audit.validation.js";
+import { escapeRegex } from "../search/search.utils.js";
 
 export async function listAuditLogs(query: AuditLogQuery) {
   const filter: Record<string, unknown> = {};
 
   if (query.action?.trim()) {
-    filter.action = { $regex: query.action.trim(), $options: "i" };
+    filter.action = { $regex: escapeRegex(query.action.trim()), $options: "i" };
   }
   if (query.entity?.trim()) {
     filter.entity = query.entity.trim();

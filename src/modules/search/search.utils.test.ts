@@ -5,4 +5,9 @@ import { escapeRegex } from "./search.utils.js";
 test("escapeRegex escapes special characters", () => {
   assert.equal(escapeRegex("a+b"), "a\\+b");
   assert.equal(escapeRegex("foo.bar"), "foo\\.bar");
+  assert.equal(
+    escapeRegex('El 11"4 Cp Round Plate (800pc'),
+    'El 11"4 Cp Round Plate \\(800pc'
+  );
+  assert.doesNotThrow(() => new RegExp(escapeRegex('El 11"4 Cp Round Plate (800pc'), "i"));
 });

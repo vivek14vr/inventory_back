@@ -1,7 +1,10 @@
 import { Types, type ClientSession } from "mongoose";
+import { AuditLog } from "../../models/AuditLog.js";
 import { Brand } from "../../models/Brand.js";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
+import { StockMovement } from "../../models/StockMovement.js";
+import { Transfer } from "../../models/Transfer.js";
 import {
   BadRequestError,
   NotFoundError,
@@ -12,6 +15,7 @@ import {
   mongoSort,
 } from "../../shared/pagination/pagination.js";
 import { normalizeProductName } from "../../shared/utils/productName.js";
+import { escapeRegex } from "../search/search.utils.js";
 import {
   resolveLowStockThresholdWithDefault,
 } from "../../shared/constants/lowStockDefaults.js";
@@ -136,7 +140,7 @@ export async function listProducts(query: ListProductsQuery) {
     filter.brandId = query.brandId;
   }
   if (query.search?.trim()) {
-    const term = query.search.trim();
+    const term = escapeRegex(query.search.trim());
     filter.$or = [
       { name: { $regex: term, $options: "i" } },
       { secondaryName: { $regex: term, $options: "i" } },
@@ -391,7 +395,12 @@ async function assertProductHasZeroStock(productId: string): Promise<void> {
   );
 }
 
-/** Soft-delete a product when total stock is zero at every warehouse. */
+/**
+ * Permanently remove a product when stock is zero at every warehouse.
+ * Balance rows are removed; historical movements (if any) are kept and will
+ * show as an unknown product in history views. Use Deactivate to hide a
+ * product without removing it.
+ */
 export async function deleteProduct(id: string) {
   if (!Types.ObjectId.isValid(id)) {
     throw new NotFoundError("Product not found");
@@ -404,12 +413,34 @@ export async function deleteProduct(id: string) {
 
   await assertProductHasZeroStock(id);
 
-  product.isActive = false;
-  await product.save();
-
   const populated = await Product.findById(product._id)
     .populate("brandId", "name isActive")
     .lean();
+  if (!populated) {
+    throw new NotFoundError("Product not found");
+  }
+  const snapshot = toPublicProduct(populated as ProductDoc);
+  const productObjectId = product._id;
 
-  return toPublicProduct(populated as ProductDoc);
+  const [hasMovements, hasTransfers] = await Promise.all([
+    StockMovement.exists({ productId: productObjectId }),
+    Transfer.exists({ productId: productObjectId }),
+  ]);
+
+  await InventoryBalance.deleteMany({ productId: productObjectId });
+  await Product.deleteOne({ _id: productObjectId });
+
+  await AuditLog.create({
+    action: "PRODUCT_DELETED",
+    entity: "Product",
+    entityId: productObjectId,
+    metadata: {
+      name: snapshot.name,
+      secondaryName: snapshot.secondaryName,
+      brandId: snapshot.brandId,
+      hadMovements: Boolean(hasMovements || hasTransfers),
+    },
+  });
+
+  return snapshot;
 }

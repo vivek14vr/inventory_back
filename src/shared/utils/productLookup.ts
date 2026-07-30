@@ -9,6 +9,8 @@ export function productBrandKey(brandName: string, label: string): string {
 type ProductWithNames = {
   name: string;
   secondaryName?: string;
+  /** When present, inactive products are ignored for auto-match. */
+  isActive?: boolean;
 };
 
 export function indexProductsByBrandAndLabel<T extends ProductWithNames>(
@@ -78,6 +80,9 @@ export function findProductByBrandLabelOverlap<T extends ProductWithNames>(
   const matches: T[] = [];
   for (const product of products) {
     if (getBrandId(product) !== brandId) continue;
+    if ("isActive" in product && (product as { isActive?: boolean }).isActive === false) {
+      continue;
+    }
     const existingLabels = [product.name, product.secondaryName]
       .map((label) => label?.trim())
       .filter((label): label is string => Boolean(label))
@@ -97,8 +102,10 @@ export function findProductByBrandLabelOverlap<T extends ProductWithNames>(
 }
 
 /**
- * Match a sales-register label against any product primary/secondary name
- * (any brand). Throws when more than one product shares the label.
+ * Match a sales-register label against any product primary or secondary name
+ * (any brand), using the same space/case-insensitive key for both fields.
+ * Inactive products are skipped so deactivating a duplicate unblocks import.
+ * Throws when more than one active product shares the label.
  */
 export function findProductByLabelOverlap<T extends ProductWithNames>(
   products: T[],
@@ -109,6 +116,8 @@ export function findProductByLabelOverlap<T extends ProductWithNames>(
 
   const matches: T[] = [];
   for (const product of products) {
+    if (product.isActive === false) continue;
+    // Same normalize flow for primary and secondary — extra spaces ignored on both.
     const existingLabels = [product.name, product.secondaryName]
       .map((name) => name?.trim())
       .filter((name): name is string => Boolean(name))

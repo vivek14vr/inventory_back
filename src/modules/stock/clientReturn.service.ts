@@ -22,6 +22,7 @@ import { hasPermission, isAdmin, getWarehouseIdsForPermission } from "../../shar
 import { resolveWarehouseIdForAnyPermission } from "../../shared/utils/permissions.js";
 import { paginateArray } from "../../shared/pagination/pagination.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
+import { escapeRegex } from "../search/search.utils.js";
 import {
   effectiveInvoiceSoldQuantity,
   notInvoiceQtyCorrection,
@@ -360,7 +361,7 @@ export async function listClientReturnInvoices(
 
   const term = query.search?.trim();
   if (term) {
-    const regex = { $regex: term, $options: "i" };
+    const regex = { $regex: escapeRegex(term), $options: "i" };
     const productIds = await Product.find({
       $or: [{ name: regex }, { secondaryName: regex }],
     }).distinct("_id");

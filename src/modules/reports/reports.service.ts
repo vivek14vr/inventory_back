@@ -18,6 +18,7 @@ import type {
   TransferReportQuery,
 } from "./reports.validation.js";
 import { buildDateFilter, toCsv } from "./reports.utils.js";
+import { escapeRegex } from "../search/search.utils.js";
 
 /** Warehouses a staff user may see in reports (reports.view grants only). */
 export function getStaffReportWarehouseIds(user: AuthUser): string[] {
@@ -203,23 +204,24 @@ export async function reportStockMovements(
         stockUnit?: string;
         unitsPerStockUnit?: number;
         baseUnit?: string;
-      };
-      const brand = m.brandId as unknown as { name: string };
-      const warehouse = m.warehouseId as unknown as { name: string; code: string };
+      } | null;
+      const brand = m.brandId as unknown as { name: string } | null;
+      const warehouse = m.warehouseId as unknown as { name: string; code: string } | null;
       const dest = m.destinationWarehouseId as unknown as
         | { name: string; code: string }
+        | null
         | undefined;
 
       return {
         date: m.createdAt,
         type: m.type,
-        warehouse: warehouse.code,
-        product: product.name,
-        brand: brand.name,
+        warehouse: warehouse?.code ?? "—",
+        product: product?.name ?? "Deleted product",
+        brand: brand?.name ?? "Unknown brand",
         quantity: m.quantity,
-        stockUnit: product.stockUnit ?? "unit",
-        unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
-        baseUnit: product.baseUnit ?? "piece",
+        stockUnit: product?.stockUnit ?? "unit",
+        unitsPerStockUnit: product?.unitsPerStockUnit ?? 1,
+        baseUnit: product?.baseUnit ?? "piece",
         dispatchType: m.dispatchType ?? "",
         destination: dest?.code ?? "",
         clientName: m.clientName ?? "",
@@ -260,10 +262,13 @@ export async function reportClientReturns(query: ReportFilter, user: AuthUser) {
     filter.productId = query.productId;
   }
   if (query.clientName?.trim()) {
-    filter.clientName = { $regex: query.clientName.trim(), $options: "i" };
+    filter.clientName = { $regex: escapeRegex(query.clientName.trim()), $options: "i" };
   }
   if (query.invoiceNumber?.trim()) {
-    filter.invoiceNumber = { $regex: query.invoiceNumber.trim(), $options: "i" };
+    filter.invoiceNumber = {
+      $regex: escapeRegex(query.invoiceNumber.trim()),
+      $options: "i",
+    };
   }
   const createdAt = buildDateFilter(query.dateFrom, query.dateTo);
   if (createdAt) filter.createdAt = createdAt;
@@ -284,19 +289,19 @@ export async function reportClientReturns(query: ReportFilter, user: AuthUser) {
         stockUnit?: string;
         unitsPerStockUnit?: number;
         baseUnit?: string;
-      };
-      const brand = m.brandId as unknown as { name: string };
-      const warehouse = m.warehouseId as unknown as { name: string; code: string };
+      } | null;
+      const brand = m.brandId as unknown as { name: string } | null;
+      const warehouse = m.warehouseId as unknown as { name: string; code: string } | null;
 
       return {
         date: m.createdAt,
-        warehouse: warehouse.code,
-        product: product.name,
-        brand: brand.name,
+        warehouse: warehouse?.code ?? "—",
+        product: product?.name ?? "Deleted product",
+        brand: brand?.name ?? "Unknown brand",
         quantity: m.quantity,
-        stockUnit: product.stockUnit ?? "unit",
-        unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
-        baseUnit: product.baseUnit ?? "piece",
+        stockUnit: product?.stockUnit ?? "unit",
+        unitsPerStockUnit: product?.unitsPerStockUnit ?? 1,
+        baseUnit: product?.baseUnit ?? "piece",
         clientName: m.clientName ?? "",
         invoiceNumber: m.invoiceNumber ?? "",
         notes: m.notes ?? "",
@@ -350,22 +355,22 @@ export async function reportTransfers(
         stockUnit?: string;
         unitsPerStockUnit?: number;
         baseUnit?: string;
-      };
-      const brand = t.brandId as unknown as { name: string };
-      const source = t.sourceWarehouseId as unknown as { name: string; code: string };
-      const dest = t.destinationWarehouseId as unknown as { name: string; code: string };
+      } | null;
+      const brand = t.brandId as unknown as { name: string } | null;
+      const source = t.sourceWarehouseId as unknown as { name: string; code: string } | null;
+      const dest = t.destinationWarehouseId as unknown as { name: string; code: string } | null;
 
       return {
         date: t.createdAt,
         status: t.status,
-        product: product.name,
-        brand: brand.name,
+        product: product?.name ?? "Deleted product",
+        brand: brand?.name ?? "Unknown brand",
         quantity: t.quantity,
-        stockUnit: product.stockUnit ?? "unit",
-        unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
-        baseUnit: product.baseUnit ?? "piece",
-        from: source.code,
-        to: dest.code,
+        stockUnit: product?.stockUnit ?? "unit",
+        unitsPerStockUnit: product?.unitsPerStockUnit ?? 1,
+        baseUnit: product?.baseUnit ?? "piece",
+        from: source?.code ?? "—",
+        to: dest?.code ?? "—",
         receivedAt: t.receivedAt ?? "",
       };
     }),
@@ -387,10 +392,13 @@ async function salesMovements(query: ReportFilter, user: AuthUser) {
     filter.productId = query.productId;
   }
   if (query.clientName?.trim()) {
-    filter.clientName = { $regex: query.clientName.trim(), $options: "i" };
+    filter.clientName = { $regex: escapeRegex(query.clientName.trim()), $options: "i" };
   }
   if (query.invoiceNumber?.trim()) {
-    filter.invoiceNumber = { $regex: query.invoiceNumber.trim(), $options: "i" };
+    filter.invoiceNumber = {
+      $regex: escapeRegex(query.invoiceNumber.trim()),
+      $options: "i",
+    };
   }
   const createdAt = buildDateFilter(query.dateFrom, query.dateTo);
   if (createdAt) filter.createdAt = createdAt;
@@ -410,18 +418,18 @@ function salesMovementLine(m: Awaited<ReturnType<typeof salesMovements>>[number]
     stockUnit?: string;
     unitsPerStockUnit?: number;
     baseUnit?: string;
-  };
-  const brand = m.brandId as unknown as { name: string };
-  const warehouse = m.warehouseId as unknown as { code: string };
+  } | null;
+  const brand = m.brandId as unknown as { name: string } | null;
+  const warehouse = m.warehouseId as unknown as { code: string } | null;
 
   return {
-    product: product.name,
-    brand: brand.name,
-    warehouse: warehouse.code,
+    product: product?.name ?? "Deleted product",
+    brand: brand?.name ?? "Unknown brand",
+    warehouse: warehouse?.code ?? "—",
     quantity: m.quantity,
-    stockUnit: product.stockUnit ?? "unit",
-    unitsPerStockUnit: product.unitsPerStockUnit ?? 1,
-    baseUnit: product.baseUnit ?? "piece",
+    stockUnit: product?.stockUnit ?? "unit",
+    unitsPerStockUnit: product?.unitsPerStockUnit ?? 1,
+    baseUnit: product?.baseUnit ?? "piece",
   };
 }
 

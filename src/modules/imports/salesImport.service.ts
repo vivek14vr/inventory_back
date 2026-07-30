@@ -11,7 +11,7 @@ import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
 import { assertImportRowCount } from "../../shared/constants/importLimits.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
 import type { AuthUser } from "../../shared/types/auth.js";
-import { findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
+import { findProductByBrandLabelOverlap, findProductByLabelOverlap } from "../../shared/utils/productLookup.js";
 import { normalizeEntityName, normalizeProductName } from "../../shared/utils/productName.js";
 import { assertPermission } from "../../shared/utils/permissions.js";
 import { Permission } from "../../shared/constants/permissions.js";
@@ -540,6 +540,17 @@ async function loadSalesImportContext() {
   };
 }
 
+/** Qty / pack markers like "(800pc)" must not become brand names. */
+function isLikelyQuantityToken(token: string): boolean {
+  const t = token.trim().toLowerCase();
+  if (!t) return true;
+  if (/^\(?\d+[\d.,]*\s*(pcs?|pieces?|pkts?|boxes?|kg|g|ml|l|units?)\)?$/i.test(t)) {
+    return true;
+  }
+  if (/^\(\d+.*\)$/.test(t)) return true;
+  return false;
+}
+
 function inferBrandNameForSalesLine(
   productName: string,
   brandByName: Map<string, { _id: Types.ObjectId; name: string }>,
@@ -556,19 +567,23 @@ function inferBrandNameForSalesLine(
   const haystack = normalizeEntityName(trimmed);
   for (const brand of sortedBrands) {
     const needle = normalizeEntityName(brand.name);
-    if (needle && haystack.endsWith(needle)) {
+    if (!needle || needle.length < 2) continue;
+    // Prefer brand as a prefix (common in Tally particulars), then suffix.
+    if (haystack.startsWith(needle) || haystack.endsWith(needle)) {
       return brand.name;
     }
   }
 
-  const parts = trimmed.split(/\s+/);
-  return parts.length > 1 ? parts[parts.length - 1]! : "";
+  const parts = trimmed.split(/\s+/).filter((part) => !isLikelyQuantityToken(part));
+  if (parts.length === 0) return "";
+  // First token is usually the brand in sales-register particulars.
+  return parts[0]!;
 }
 
 export async function previewSalesImport(fileBuffer: Buffer) {
   const parsedVouchers = parseSalesRegisterExcelBuffer(fileBuffer);
   const {
-    allProducts,
+    products: activeProducts,
     brandByName,
     brandIdToName,
     existingProducts,
@@ -612,7 +627,7 @@ export async function previewSalesImport(fileBuffer: Buffer) {
 
       if (lineErrors.length === 0) {
         try {
-          const match = findProductByLabelOverlap(allProducts, line.productName);
+          const match = findProductByLabelOverlap(activeProducts, line.productName);
           if (match) {
             matchedProduct = {
               id: String(match._id),
@@ -723,22 +738,21 @@ async function resolveBrandForSalesLine(
   }
   const nameKey = normalizeEntityName(trimmed);
 
+  // Find-or-create by space-insensitive name so "Eco Infinity" / "Eco  Infinity"
+  // and repeated create actions in the same (or later) confirm reuse one brand.
   const existingActive = brands.find(
-    (item) => normalizeEntityName(item.name) === nameKey
+    (item) => item.isActive !== false && normalizeEntityName(item.name) === nameKey
   );
   if (existingActive) {
-    throw new BadRequestError(
-      `Brand "${trimmed}" already exists. Use "Use existing brand" to merge into it instead.`
-    );
+    return { brandId: String(existingActive._id), created: false };
   }
 
-  const inactiveCandidates = await Brand.find({ isActive: false }).lean();
-  const inactive = inactiveCandidates.find(
-    (item) => normalizeEntityName(item.name) === nameKey
+  const inactive = brands.find(
+    (item) => item.isActive === false && normalizeEntityName(item.name) === nameKey
   );
   if (inactive) {
     await Brand.updateOne({ _id: inactive._id }, { $set: { isActive: true } });
-    brands.push({ ...inactive, isActive: true });
+    inactive.isActive = true;
     return { brandId: String(inactive._id), created: false };
   }
 
@@ -850,7 +864,7 @@ async function resolveSalesImportLineProduct(
   line: SalesImportConfirmInput["vouchers"][number]["lines"][number],
   brandId: string,
   createdCache: Map<string, string>,
-  productById: Map<string, { _id: Types.ObjectId; brandId: Types.ObjectId; isActive?: boolean }>
+  productById: Map<string, { _id: Types.ObjectId; brandId: Types.ObjectId; isActive?: boolean; name?: string; secondaryName?: string }>
 ): Promise<{ productId: string; brandId: string; created: boolean }> {
   if (line.action === "merge") {
     const product = productById.get(line.mergeTargetProductId!);
@@ -882,6 +896,41 @@ async function resolveSalesImportLineProduct(
     };
   }
 
+  // Same flow as preview: stripped import label vs primary AND secondary (any brand).
+  const candidates = [...productById.values()].filter(
+    (
+      product
+    ): product is {
+      _id: Types.ObjectId;
+      brandId: Types.ObjectId;
+      name: string;
+      secondaryName?: string;
+      isActive?: boolean;
+    } => product.isActive !== false && Boolean(product.name)
+  );
+  const existing =
+    findProductByLabelOverlap(candidates, line.productName.trim()) ??
+    findProductByBrandLabelOverlap(
+      candidates,
+      brandId,
+      line.productName.trim(),
+      undefined,
+      (product) => String(product.brandId)
+    );
+  if (existing) {
+    const productId = String(existing._id);
+    createdCache.set(cacheKey, productId);
+    createdCache.set(
+      productCreateCacheKey(String(existing.brandId), line.productName),
+      productId
+    );
+    return {
+      productId,
+      brandId: String(existing.brandId),
+      created: false,
+    };
+  }
+
   const created = await createProduct({
     name: line.productName.trim(),
     brandId,
@@ -895,6 +944,7 @@ async function resolveSalesImportLineProduct(
   productById.set(created.id, {
     _id: new Types.ObjectId(created.id),
     brandId: new Types.ObjectId(brandId),
+    name: line.productName.trim(),
     isActive: true,
   });
 
@@ -1076,10 +1126,12 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     }
   }
 
-  const { allProducts } = await loadSalesImportContext();
+  const { allProducts, allBrands } = await loadSalesImportContext();
   const productById = new Map(allProducts.map((product) => [String(product._id), product]));
   const createdProductCache = new Map<string, string>();
-  const brandDocs: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }> = [];
+  const brandDocs: Array<{ _id: Types.ObjectId; name: string; isActive?: boolean }> = [
+    ...allBrands,
+  ];
   const clientDocs: Array<{ _id: Types.ObjectId; name: string; secondaryName?: string }> = [];
 
   const lineResults: SalesImportResultLine[] = [];

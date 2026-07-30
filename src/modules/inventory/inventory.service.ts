@@ -22,6 +22,7 @@ import {
   sumReturnedQuantityForSale,
 } from "../stock/saleReturn.utils.js";
 import { exactCaseInsensitiveRegex } from "../../shared/utils/invoiceMatch.js";
+import { escapeRegex } from "../search/search.utils.js";
 import {
   DispatchType,
   StockMovementType,
@@ -493,24 +494,29 @@ function extractObjectId(value: unknown): string | null {
 }
 
 function mapMovementRow(m: MovementDoc) {
-  const product = m.productId as {
+  const productPop = m.productId as {
     _id: Types.ObjectId;
     name: string;
     secondaryName?: string;
     stockUnit?: string;
     unitsPerStockUnit?: number;
     baseUnit?: string;
-  };
-  const brand = m.brandId as { _id: Types.ObjectId; name: string };
-  const warehouse = m.warehouseId as {
+  } | null;
+  const brandPop = m.brandId as { _id: Types.ObjectId; name: string } | null;
+  const warehousePop = m.warehouseId as {
     _id: Types.ObjectId;
     name: string;
     code: string;
-  };
+  } | null;
   const dest = m.destinationWarehouseId as
     | { _id: Types.ObjectId; name: string; code: string }
+    | null
     | undefined;
-  const createdBy = m.createdBy as { _id: Types.ObjectId; name: string } | undefined;
+  const createdBy = m.createdBy as { _id: Types.ObjectId; name: string } | null | undefined;
+
+  const productId = extractObjectId(m.productId) ?? "unknown";
+  const brandId = extractObjectId(m.brandId) ?? "unknown";
+  const warehouseId = extractObjectId(m.warehouseId) ?? "unknown";
 
   return {
     id: String(m._id),
@@ -535,18 +541,21 @@ function mapMovementRow(m: MovementDoc) {
     invoiceModificationCount: m.invoiceModificationCount ?? 0,
     transferId: m.transferId ? String(m.transferId) : undefined,
     product: {
-      id: String(product._id),
-      name: product.name,
-      secondaryName: product.secondaryName,
-      stockUnit: product.stockUnit,
-      unitsPerStockUnit: product.unitsPerStockUnit,
-      baseUnit: product.baseUnit,
+      id: productId,
+      name: productPop?.name ?? "Deleted product",
+      secondaryName: productPop?.secondaryName,
+      stockUnit: productPop?.stockUnit,
+      unitsPerStockUnit: productPop?.unitsPerStockUnit,
+      baseUnit: productPop?.baseUnit,
     },
-    brand: { id: String(brand._id), name: brand.name },
+    brand: {
+      id: brandId,
+      name: brandPop?.name ?? "Unknown brand",
+    },
     warehouse: {
-      id: String(warehouse._id),
-      name: warehouse.name,
-      code: warehouse.code,
+      id: warehouseId,
+      name: warehousePop?.name ?? "Unknown warehouse",
+      code: warehousePop?.code ?? "—",
     },
     destinationWarehouse: dest
       ? { id: String(dest._id), name: dest.name, code: dest.code }
@@ -989,7 +998,7 @@ export async function listMovementHistory(
 
   const search = query.search?.trim();
   if (search) {
-    const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const regex = new RegExp(escapeRegex(search), "i");
     const [productIds, brandIds, warehouseIds] = await Promise.all([
       Product.find({ $or: [{ name: regex }, { secondaryName: regex }] }).distinct("_id"),
       Brand.find({ name: regex }).distinct("_id"),
@@ -1281,10 +1290,10 @@ export async function getAdminDashboard() {
     .lean();
 
   const transferActivity = recentTransfers.map((t) => {
-    const product = t.productId as unknown as { name: string };
-    const brand = t.brandId as unknown as { name: string };
-    const source = t.sourceWarehouseId as unknown as { name: string; code: string };
-    const dest = t.destinationWarehouseId as unknown as { name: string; code: string };
+    const product = t.productId as unknown as { name: string } | null;
+    const brand = t.brandId as unknown as { name: string } | null;
+    const source = t.sourceWarehouseId as unknown as { name: string; code: string } | null;
+    const dest = t.destinationWarehouseId as unknown as { name: string; code: string } | null;
     const createdBy = t.createdBy as unknown as { name: string } | null;
     const receivedBy = t.receivedBy as unknown as { name: string } | null;
     const returnedBy = t.returnedBy as unknown as { name: string } | null;
@@ -1293,10 +1302,10 @@ export async function getAdminDashboard() {
       date: t.createdAt.toISOString().slice(0, 10),
       status: t.status,
       quantity: t.quantity,
-      product: product.name,
-      brand: brand.name,
-      sourceWarehouse: source.code,
-      destinationWarehouse: dest.code,
+      product: product?.name ?? "Deleted product",
+      brand: brand?.name ?? "Unknown brand",
+      sourceWarehouse: source?.code ?? "—",
+      destinationWarehouse: dest?.code ?? "—",
       initiatedBy: createdBy?.name,
       receivedBy: receivedBy?.name,
       returnedBy: returnedBy?.name,
@@ -1307,21 +1316,21 @@ export async function getAdminDashboard() {
   });
 
   const sales = recentSales.map((m) => {
-    const product = m.productId as unknown as { _id: Types.ObjectId; name: string };
-    const brand = m.brandId as unknown as { _id: Types.ObjectId; name: string };
+    const product = m.productId as unknown as { _id: Types.ObjectId; name: string } | null;
+    const brand = m.brandId as unknown as { _id: Types.ObjectId; name: string } | null;
     const warehouse = m.warehouseId as unknown as {
       _id: Types.ObjectId;
       name: string;
       code: string;
-    };
+    } | null;
     return {
       id: String(m._id),
       quantity: m.quantity,
       clientName: m.clientName,
       invoiceNumber: m.invoiceNumber,
-      product: product.name,
-      brand: brand.name,
-      warehouse: warehouse.name,
+      product: product?.name ?? "Deleted product",
+      brand: brand?.name ?? "Unknown brand",
+      warehouse: warehouse?.name ?? "Unknown warehouse",
       createdAt: m.createdAt,
     };
   });
@@ -1867,7 +1876,7 @@ async function resolveInvoiceMovementFilter(
 
   const term = query.search?.trim();
   if (term) {
-    const regex = { $regex: term, $options: "i" };
+    const regex = { $regex: escapeRegex(term), $options: "i" };
     const productIds = await Product.find({
       $or: [{ name: regex }, { secondaryName: regex }],
     }).distinct("_id");

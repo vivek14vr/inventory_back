@@ -8,6 +8,10 @@ test("normalizeProductName lowercases, trims, and removes spaces", () => {
   assert.equal(normalizeProductName("11 inch plate"), "11inchplate");
   assert.equal(normalizeProductName("11  inch  plate"), "11inchplate");
   assert.equal(normalizeProductName("11 Inch Plate"), "11inchplate");
+  assert.equal(
+    normalizeProductName("ECOINFINITY 11 INCH 4 CP ROUND PLATE (800pc)"),
+    normalizeProductName("ECOINFINITY  11 INCH 4 CP ROUND PLATE (800pc)")
+  );
 });
 
 test("formatProductDisplayName appends secondary name when present", () => {

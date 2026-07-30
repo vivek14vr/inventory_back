@@ -4,6 +4,7 @@ import { BadRequestError } from "../errors/AppError.js";
 import {
   findProductByBrandAndLabel,
   findProductByBrandLabelOverlap,
+  findProductByLabelOverlap,
   indexProductsByBrandAndLabel,
 } from "./productLookup.js";
 
@@ -89,6 +90,73 @@ test("overlap lookup matches ignoring extra spaces and case", () => {
     (p) => p.brandId
   );
   assert.equal(match, products[0]);
+});
+
+test("label overlap matches sales-register names ignoring extra spaces", () => {
+  const products = [
+    { name: "ECOINFINITY 11 INCH 4 CP ROUND PLATE (800pc)" },
+  ];
+  const match = findProductByLabelOverlap(
+    products,
+    "ECOINFINITY  11 INCH 4 CP ROUND PLATE (800pc)"
+  );
+  assert.equal(match, products[0]);
+});
+
+test("label overlap ignores inactive products so deactivated duplicates do not block", () => {
+  const products = [
+    {
+      name: 'EI 11"4 Cp Round Plate (800pc)',
+      isActive: false,
+    },
+    {
+      name: 'EI 11"4 Cp Round Plate (800pc)',
+      secondaryName: "ECOINFINITY 11 INCH 4 CP ROUND PLATE BROWN",
+      isActive: true,
+    },
+  ];
+
+  assert.equal(
+    findProductByLabelOverlap(products, 'EI 11"4 CpRoundPlate (800pc)'),
+    products[1]
+  );
+});
+
+test("label overlap still throws when multiple active products match", () => {
+  const products = [
+    { name: 'EI 11"4 Cp Round Plate (800pc)', isActive: true },
+    {
+      name: "Other",
+      secondaryName: 'EI 11"4 Cp Round Plate (800pc)',
+      isActive: true,
+    },
+  ];
+
+  assert.throws(
+    () => findProductByLabelOverlap(products, 'EI 11"4 CpRoundPlate (800pc)'),
+    BadRequestError
+  );
+});
+
+test("brand overlap matches stripped import name against secondary name", () => {
+  const products: BrandProduct[] = [
+    {
+      name: 'El 11"4 Cp Round Plate (800pc)',
+      secondaryName: "ECOINFINITY 11 INCH 4 CP ROUND PLATE (800pc)",
+      brandId: "b1",
+    },
+  ];
+
+  assert.equal(
+    findProductByBrandLabelOverlap(
+      products,
+      "b1",
+      "ECOINFINITY  11 INCH 4 CP ROUND PLATE (800pc)",
+      undefined,
+      (p) => p.brandId
+    ),
+    products[0]
+  );
 });
 
 test("overlap lookup throws when an import row matches multiple products", () => {
