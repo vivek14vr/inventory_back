@@ -11,6 +11,7 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as brandsService from "./brands.service.js";
 import { createBrandSchema, updateBrandSchema } from "./brands.validation.js";
+import { AuditLog } from "../../models/AuditLog.js";
 
 const router = Router();
 
@@ -83,6 +84,28 @@ router.patch(
       parsed.data
     );
     sendSuccess(res, brand);
+  })
+);
+
+router.delete(
+  "/:id",
+  authenticate,
+  requireAdminOrPermission(Permission.BRANDS_MANAGE),
+  asyncHandler(async (req, res) => {
+    const brand = await brandsService.deleteBrandPermanently(String(req.params.id));
+    await AuditLog.create({
+      action: "BRAND_DELETED",
+      entity: "Brand",
+      entityId: brand.id,
+      userId: req.user!.id,
+      requestId: req.auditRequestId,
+      metadata: {
+        name: brand.name,
+        isActive: brand.isActive,
+        permanent: true,
+      },
+    });
+    sendSuccess(res, { deleted: true, id: brand.id, name: brand.name });
   })
 );
 

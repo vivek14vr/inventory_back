@@ -1,5 +1,7 @@
 import { Types } from "mongoose";
 import { Client } from "../../models/Client.js";
+import { SalesInvoiceClaim } from "../../models/SalesInvoiceClaim.js";
+import { StockMovement } from "../../models/StockMovement.js";
 import {
   BadRequestError,
   NotFoundError,
@@ -97,4 +99,29 @@ export async function updateClient(id: string, input: UpdateClientInput) {
 
   await client.save();
   return toPublicClient(client.toObject());
+}
+
+export async function deleteClientPermanently(id: string) {
+  if (!Types.ObjectId.isValid(id)) {
+    throw new NotFoundError("Client not found");
+  }
+
+  const client = await Client.findById(id).lean();
+  if (!client) {
+    throw new NotFoundError("Client not found");
+  }
+
+  const nameMatch = exactNameRegex(client.name);
+  const [movementCount, invoiceClaimCount] = await Promise.all([
+    StockMovement.countDocuments({ clientName: nameMatch }),
+    SalesInvoiceClaim.countDocuments({ clientName: nameMatch }),
+  ]);
+  if (movementCount > 0 || invoiceClaimCount > 0) {
+    throw new BadRequestError(
+      `Client cannot be permanently deleted because it is referenced by ${movementCount} stock movement(s) and ${invoiceClaimCount} invoice claim(s). Deactivate it instead.`
+    );
+  }
+
+  await Client.deleteOne({ _id: client._id });
+  return toPublicClient(client);
 }

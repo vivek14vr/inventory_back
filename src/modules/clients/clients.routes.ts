@@ -132,4 +132,27 @@ router.patch(
   })
 );
 
+router.delete(
+  "/:id",
+  authenticate,
+  requireAdminOrPermission(Permission.CLIENTS_MANAGE),
+  asyncHandler(async (req, res) => {
+    const client = await clientsService.deleteClientPermanently(String(req.params.id));
+    await AuditLog.create({
+      action: "CLIENT_DELETED",
+      entity: "Client",
+      entityId: client.id,
+      userId: req.user!.id,
+      requestId: req.auditRequestId,
+      metadata: {
+        name: client.name,
+        secondaryName: client.secondaryName,
+        isActive: client.isActive,
+        permanent: true,
+      },
+    });
+    sendSuccess(res, { deleted: true, id: client.id, name: client.name });
+  })
+);
+
 export const clientsRoutes = router;

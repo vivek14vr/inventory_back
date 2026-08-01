@@ -6,6 +6,7 @@ import { Client } from "../../models/Client.js";
 import { InventoryBalance } from "../../models/InventoryBalance.js";
 import { Product } from "../../models/Product.js";
 import { StockMovement } from "../../models/StockMovement.js";
+import { SalesInvoiceClaim } from "../../models/SalesInvoiceClaim.js";
 import { Transfer } from "../../models/Transfer.js";
 import { Warehouse } from "../../models/Warehouse.js";
 import { BadRequestError, NotFoundError } from "../../shared/errors/AppError.js";
@@ -2632,6 +2633,18 @@ export async function deleteSaleInvoice(movementId: string, user: AuthUser) {
         },
       ],
     }).session(session ?? null);
+
+    const updatedClaim = await SalesInvoiceClaim.findOneAndUpdate(
+      { movementIds: movement._id },
+      { $pull: { movementIds: movement._id } },
+      { new: true, ...(session ? { session } : {}) }
+    );
+    if (updatedClaim && updatedClaim.movementIds.length === 0) {
+      await SalesInvoiceClaim.deleteOne(
+        { _id: updatedClaim._id },
+        dbSession(session)
+      );
+    }
 
     const product = await Product.findById(movement.productId).lean();
     const warehouse = await Warehouse.findById(movement.warehouseId).lean();

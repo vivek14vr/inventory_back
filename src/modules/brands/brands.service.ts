@@ -1,6 +1,8 @@
 import { Types, type ClientSession } from "mongoose";
 import { Brand } from "../../models/Brand.js";
 import { Product } from "../../models/Product.js";
+import { StockMovement } from "../../models/StockMovement.js";
+import { Transfer } from "../../models/Transfer.js";
 import {
   BadRequestError,
   NotFoundError,
@@ -91,4 +93,31 @@ export async function updateBrand(id: string, input: UpdateBrandInput) {
 
 export async function getBrandProductCount(id: string): Promise<number> {
   return Product.countDocuments({ brandId: id, isActive: true });
+}
+
+export async function deleteBrandPermanently(id: string) {
+  if (!Types.ObjectId.isValid(id)) {
+    throw new NotFoundError("Brand not found");
+  }
+
+  const brand = await Brand.findById(id);
+  if (!brand) {
+    throw new NotFoundError("Brand not found");
+  }
+
+  const [productCount, movementCount, transferCount] = await Promise.all([
+    Product.countDocuments({ brandId: id }),
+    StockMovement.countDocuments({ brandId: id }),
+    Transfer.countDocuments({ brandId: id }),
+  ]);
+  const references = productCount + movementCount + transferCount;
+  if (references > 0) {
+    throw new BadRequestError(
+      `Brand cannot be permanently deleted because it is referenced by ${productCount} product(s), ${movementCount} stock movement(s), and ${transferCount} transfer(s). Deactivate it instead.`
+    );
+  }
+
+  const snapshot = toPublicBrand(brand.toObject());
+  await Brand.deleteOne({ _id: brand._id });
+  return snapshot;
 }

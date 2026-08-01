@@ -7,6 +7,7 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as auditService from "./audit.service.js";
 import { auditLogQuerySchema } from "./audit.validation.js";
+import { revertAuditAction } from "../reports/revert.service.js";
 
 const router = Router();
 
@@ -37,6 +38,15 @@ router.get(
     }
     const { items, pagination } = await auditService.listAuditLogs(parsed.data);
     sendSuccess(res, items, 200, { pagination });
+  })
+);
+
+router.post(
+  "/:auditId/revert",
+  requireAdminOrPermission(Permission.REPORTS_REVERT),
+  asyncHandler(async (req, res) => {
+    const result = await revertAuditAction(String(req.params.auditId), req.user!);
+    sendSuccess(res, result);
   })
 );
 

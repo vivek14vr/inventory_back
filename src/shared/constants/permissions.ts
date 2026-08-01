@@ -36,6 +36,7 @@ export const Permission = {
   PRODUCTS_MANAGE: "products.manage",
 
   REPORTS_VIEW: "reports.view",
+  REPORTS_REVERT: "reports.revert",
 
   /** @deprecated Prefer imports.products / imports.clients / imports.sales */
   IMPORTS_MANAGE: "imports.manage",
@@ -267,6 +268,14 @@ export const PERMISSION_MODULES: PermissionModuleDefinition[] = [
         description:
           "Open Reports and download CSV exports for this warehouse only.",
         example: "Export Goregaon stock movement report for accounting.",
+      },
+      {
+        code: Permission.REPORTS_REVERT,
+        label: "Revert internal actions",
+        description:
+          "Undo supported internal changes when no newer data would be overwritten.",
+        example: "Revert an incorrect stock adjustment from the Internal actions report.",
+        warehouseScoped: false,
       },
     ],
   },

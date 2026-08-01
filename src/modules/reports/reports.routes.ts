@@ -2,7 +2,7 @@ import { Router, type Response } from "express";
 import { Permission } from "../../shared/constants/permissions.js";
 import { BadRequestError } from "../../shared/errors/AppError.js";
 import { authenticate } from "../../shared/middleware/authenticate.js";
-import { requireAnyPermission } from "../../shared/middleware/requirePermission.js";
+import { requireAdminOrPermission, requireAnyPermission } from "../../shared/middleware/requirePermission.js";
 import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as reportsService from "./reports.service.js";
@@ -12,6 +12,7 @@ import {
   stockReportSchema,
   transferReportSchema,
 } from "./reports.validation.js";
+import { revertAuditAction } from "./revert.service.js";
 
 const router = Router();
 
@@ -32,6 +33,28 @@ async function handleExport(
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.send(csv);
 }
+
+router.get(
+  "/internal-actions",
+  requireAdminOrPermission(Permission.AUDIT_VIEW),
+  asyncHandler(async (req, res) => {
+    const parsed = reportFilterSchema.safeParse(req.query);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid query");
+    }
+    const data = await reportsService.reportInternalActions(parsed.data);
+    sendSuccess(res, data);
+  })
+);
+
+router.post(
+  "/internal-actions/:auditId/revert",
+  requireAdminOrPermission(Permission.REPORTS_REVERT),
+  asyncHandler(async (req, res) => {
+    const result = await revertAuditAction(String(req.params.auditId), req.user!);
+    sendSuccess(res, result);
+  })
+);
 
 router.get(
   "/stock",

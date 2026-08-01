@@ -9,6 +9,10 @@ export interface IAuditLog extends Document {
   outcome: "SUCCESS" | "FAILURE";
   requestId?: string;
   metadata?: Record<string, unknown>;
+  revertedAt?: Date;
+  revertStartedAt?: Date;
+  revertedBy?: Types.ObjectId;
+  revertAuditLogId?: Types.ObjectId;
   createdAt: Date;
 }
 
@@ -30,6 +34,10 @@ const auditLogSchema = new Schema<IAuditLog>(
     },
     requestId: { type: String, trim: true },
     metadata: { type: Schema.Types.Mixed },
+    revertedAt: { type: Date },
+    revertStartedAt: { type: Date },
+    revertedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    revertAuditLogId: { type: Schema.Types.ObjectId, ref: "AuditLog" },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );

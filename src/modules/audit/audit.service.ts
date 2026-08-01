@@ -9,6 +9,7 @@ import {
 } from "../../shared/pagination/pagination.js";
 import type { AuditLogQuery } from "./audit.validation.js";
 import { escapeRegex } from "../search/search.utils.js";
+import { revertCapability } from "../reports/revert.service.js";
 
 export async function listAuditLogs(query: AuditLogQuery) {
   const filter: Record<string, unknown> = {};
@@ -55,6 +56,8 @@ export async function listAuditLogs(query: AuditLogQuery) {
       | null
       | undefined;
 
+    const capability = revertCapability(log);
+
     return {
       id: String(log._id),
       action: log.action,
@@ -63,6 +66,11 @@ export async function listAuditLogs(query: AuditLogQuery) {
       source: log.source ?? "APPLICATION",
       outcome: log.outcome ?? "SUCCESS",
       requestId: log.requestId,
+      revertedAt: log.revertedAt,
+      revertedBy: log.revertedBy ? String(log.revertedBy) : undefined,
+      revertAuditLogId: log.revertAuditLogId ? String(log.revertAuditLogId) : undefined,
+      canRevert: capability.canRevert,
+      revertReason: capability.reason,
       user: user
         ? {
             id: String(user._id),

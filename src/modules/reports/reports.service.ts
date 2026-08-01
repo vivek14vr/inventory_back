@@ -18,6 +18,8 @@ import type {
   TransferReportQuery,
 } from "./reports.validation.js";
 import { buildDateFilter, toCsv } from "./reports.utils.js";
+import { AuditLog } from "../../models/AuditLog.js";
+import { revertCapability } from "./revert.service.js";
 import { escapeRegex } from "../search/search.utils.js";
 
 /** Warehouses a staff user may see in reports (reports.view grants only). */
@@ -648,6 +650,51 @@ export async function reportSalesByBrand(query: ReportFilter, user: AuthUser) {
           .sort((a, b) => a.product.localeCompare(b.product)),
       }))
       .sort((a, b) => a.brand.localeCompare(b.brand)),
+  };
+}
+
+export async function reportInternalActions(query: ReportFilter) {
+  const filter: Record<string, unknown> = { outcome: { $in: ["SUCCESS", null] } };
+  const createdAt = buildDateFilter(query.dateFrom, query.dateTo);
+  if (createdAt) filter.createdAt = createdAt;
+
+  const logs = await AuditLog.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(query.limit ?? 1000)
+    .populate("userId", "name email")
+    .lean();
+
+  return {
+    type: "INTERNAL_ACTIONS",
+    rows: logs.map((log) => {
+      const user = log.userId as unknown as { name?: string; email?: string } | null;
+      const capability = revertCapability(log);
+      const meta = log.metadata ?? {};
+      const details = [
+        meta.productName,
+        meta.clientName ?? meta.name,
+        meta.invoiceNumber,
+        meta.warehouseName,
+        typeof meta.previous === "number" && typeof meta.next === "number"
+          ? `${meta.previous} → ${meta.next}`
+          : undefined,
+      ]
+        .filter((value) => value !== undefined && value !== null && value !== "")
+        .map(String)
+        .join(" · ");
+      return {
+        id: String(log._id),
+        date: log.createdAt,
+        action: log.action,
+        entity: log.entity,
+        user: user?.name ?? "System",
+        details: details || "—",
+        status: log.revertedAt ? "REVERTED" : capability.canRevert ? "REVERSIBLE" : "RECORDED",
+        canRevert: capability.canRevert,
+        revertReason: capability.reason ?? "",
+        revertedAt: log.revertedAt ?? "",
+      };
+    }),
   };
 }
 
