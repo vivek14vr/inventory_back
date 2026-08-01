@@ -12,6 +12,7 @@ import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import { resolveCheckStockWarehouseScope } from "../../shared/utils/warehouseAccess.js";
 import * as inventoryAdminService from "./inventory.service.js";
 import {
+  addInvoiceProductSchema,
   adjustStockSchema,
   invoiceListQuerySchema,
   invoiceLookupQuerySchema,
@@ -258,6 +259,23 @@ router.patch(
       req.user!
     );
     sendSuccess(res, result);
+  })
+);
+
+router.post(
+  "/movements/:movementId/invoice/lines",
+  requireInventoryAdjust,
+  asyncHandler(async (req, res) => {
+    const parsed = addInvoiceProductSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid body");
+    }
+    const result = await inventoryAdminService.addProductToSaleInvoice(
+      String(req.params.movementId),
+      parsed.data,
+      req.user!
+    );
+    sendSuccess(res, result, 201);
   })
 );
 

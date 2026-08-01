@@ -8,6 +8,7 @@ import { createApiRouter } from "./routes/index.js";
 import { apiRateLimiter } from "./shared/middleware/rateLimit.js";
 import { notFoundHandler } from "./shared/middleware/notFound.js";
 import { errorHandler } from "./shared/middleware/errorHandler.js";
+import { auditMutationTrail } from "./shared/middleware/auditMutation.js";
 
 export function createApp() {
   const app = express();
@@ -49,7 +50,7 @@ export function createApp() {
     });
   });
 
-  app.use(env.API_PREFIX, apiRateLimiter, createApiRouter());
+  app.use(env.API_PREFIX, auditMutationTrail, apiRateLimiter, createApiRouter());
   app.use(notFoundHandler);
   app.use(errorHandler);
 

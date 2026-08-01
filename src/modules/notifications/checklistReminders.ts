@@ -2,6 +2,7 @@ import { Types } from "mongoose";
 import { Checklist } from "../../models/Checklist.js";
 import { ChecklistCompletion } from "../../models/ChecklistCompletion.js";
 import { Notification } from "../../models/Notification.js";
+import { AuditLog } from "../../models/AuditLog.js";
 import {
   DEFAULT_BEFORE_OFFSETS_MIN,
   DEFAULT_CHECKLIST_REMINDER_SETTINGS,
@@ -288,6 +289,22 @@ async function upsertReminder(input: {
         resolved: false,
       },
     ]);
+    await AuditLog.create({
+      action: "NOTIFICATION_CREATED",
+      entity: "Notification",
+      entityId: doc._id,
+      userId: input.userId,
+      source: "SYSTEM",
+      metadata: {
+        type: input.type,
+        title: input.title,
+        checklistTitle: input.checklistTitle,
+        taskTitle: input.taskTitle,
+        date: input.date,
+        reminderKey: input.reminderKey,
+        automatic: true,
+      },
+    });
     return doc;
   } catch (err: unknown) {
     // Concurrent poll / unique index race
@@ -309,7 +326,7 @@ export async function resolveTaskNotifications(
   taskId: string,
   date: string
 ) {
-  await Notification.updateMany(
+  const result = await Notification.updateMany(
     {
       userId,
       checklistId,
@@ -326,6 +343,21 @@ export async function resolveTaskNotifications(
       },
     }
   );
+  if (result.modifiedCount > 0) {
+    await AuditLog.create({
+      action: "NOTIFICATIONS_RESOLVED",
+      entity: "Notification",
+      userId,
+      source: "SYSTEM",
+      metadata: {
+        checklistId,
+        taskId,
+        date,
+        resolvedCount: result.modifiedCount,
+        automatic: true,
+      },
+    });
+  }
 }
 
 export function mapNotification(doc: {

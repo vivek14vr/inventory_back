@@ -22,6 +22,16 @@ export async function listAuditLogs(query: AuditLogQuery) {
   if (query.userId && Types.ObjectId.isValid(query.userId)) {
     filter.userId = query.userId;
   }
+  if (query.source) {
+    filter.source =
+      query.source === "APPLICATION"
+        ? { $in: ["APPLICATION", null] }
+        : query.source;
+  }
+  if (query.outcome) {
+    filter.outcome =
+      query.outcome === "SUCCESS" ? { $in: ["SUCCESS", null] } : query.outcome;
+  }
 
   const createdAt = buildDateFilter(query.dateFrom, query.dateTo);
   if (createdAt) filter.createdAt = createdAt;
@@ -50,6 +60,9 @@ export async function listAuditLogs(query: AuditLogQuery) {
       action: log.action,
       entity: log.entity,
       entityId: log.entityId ? String(log.entityId) : undefined,
+      source: log.source ?? "APPLICATION",
+      outcome: log.outcome ?? "SUCCESS",
+      requestId: log.requestId,
       user: user
         ? {
             id: String(user._id),

@@ -11,6 +11,7 @@ import { asyncHandler } from "../../shared/utils/asyncHandler.js";
 import { sendSuccess } from "../../shared/utils/apiResponse.js";
 import * as clientsService from "./clients.service.js";
 import { createClientSchema, updateClientSchema } from "./clients.validation.js";
+import { AuditLog } from "../../models/AuditLog.js";
 
 const router = Router();
 
@@ -61,6 +62,19 @@ router.post(
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
     }
     const client = await clientsService.createClient(parsed.data);
+    await AuditLog.create({
+      action: "CLIENT_CREATED",
+      entity: "Client",
+      entityId: client.id,
+      userId: req.user!.id,
+      requestId: req.auditRequestId,
+      metadata: {
+        name: client.name,
+        secondaryName: client.secondaryName,
+        isActive: client.isActive,
+        source: "client_admin",
+      },
+    });
     sendSuccess(res, client, 201);
   })
 );
@@ -74,7 +88,46 @@ router.patch(
     if (!parsed.success) {
       throw new BadRequestError(parsed.error.errors[0]?.message ?? "Invalid input");
     }
+    const previous = await clientsService.getClientById(String(req.params.id));
     const client = await clientsService.updateClient(String(req.params.id), parsed.data);
+    const changes = [
+      previous.name !== client.name
+        ? { field: "name", before: previous.name, after: client.name }
+        : undefined,
+      previous.secondaryName !== client.secondaryName
+        ? {
+            field: "secondaryName",
+            before: previous.secondaryName ?? null,
+            after: client.secondaryName ?? null,
+          }
+        : undefined,
+      previous.isActive !== client.isActive
+        ? { field: "isActive", before: previous.isActive, after: client.isActive }
+        : undefined,
+    ].filter(Boolean);
+    const action =
+      previous.isActive !== client.isActive
+        ? client.isActive
+          ? "CLIENT_ACTIVATED"
+          : "CLIENT_DEACTIVATED"
+        : "CLIENT_UPDATED";
+    await AuditLog.create({
+      action,
+      entity: "Client",
+      entityId: client.id,
+      userId: req.user!.id,
+      requestId: req.auditRequestId,
+      metadata: {
+        name: client.name,
+        previousName: previous.name,
+        secondaryName: client.secondaryName,
+        previousSecondaryName: previous.secondaryName,
+        isActive: client.isActive,
+        previousIsActive: previous.isActive,
+        changes,
+        source: "client_admin",
+      },
+    });
     sendSuccess(res, client);
   })
 );

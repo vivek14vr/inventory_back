@@ -139,6 +139,12 @@ export const updateMovementInvoiceSchema = z.object({
     .optional(),
 });
 
+export const addInvoiceProductSchema = z.object({
+  productId: z.string().min(1, "Product is required"),
+  quantity: z.coerce.number().int().min(1, "Quantity must be at least 1"),
+});
+
 export type InvoiceListQuery = z.infer<typeof invoiceListQuerySchema>;
 export type InvoiceLookupQuery = z.infer<typeof invoiceLookupQuerySchema>;
 export type UpdateMovementInvoiceInput = z.infer<typeof updateMovementInvoiceSchema>;
+export type AddInvoiceProductInput = z.infer<typeof addInvoiceProductSchema>;

@@ -788,7 +788,7 @@ async function resolveClientForVoucher(
     secondaryName?: string;
     isActive?: boolean;
   }>
-): Promise<{ clientName: string; created: boolean; clientId?: string }> {
+): Promise<{ clientName: string; created: boolean }> {
   if (voucher.clientAction === "merge") {
     const targetId = voucher.mergeTargetClientId;
     if (!targetId || !Types.ObjectId.isValid(targetId)) {
@@ -805,7 +805,7 @@ async function resolveClientForVoucher(
     if (!client) {
       throw new NotFoundError("Client not found");
     }
-    return { clientName: client.name, created: false, clientId: String(client._id) };
+    return { clientName: client.name, created: false };
   }
 
   const trimmed = voucher.clientName.trim();
@@ -823,7 +823,6 @@ async function resolveClientForVoucher(
     return {
       clientName: existingActive.name,
       created: false,
-      clientId: String(existingActive._id),
     };
   }
 
@@ -846,7 +845,7 @@ async function resolveClientForVoucher(
     if (voucher.clientSecondaryName?.trim()) {
       inactive.secondaryName = voucher.clientSecondaryName.trim();
     }
-    return { clientName: inactive.name, created: false, clientId: String(inactive._id) };
+    return { clientName: inactive.name, created: false };
   }
 
   const created = await createClient({
@@ -867,7 +866,7 @@ async function resolveClientForVoucher(
     userId: new Types.ObjectId(user.id),
     metadata: { name: trimmed, source: "sales_import" },
   });
-  return { clientName: created.name, created: true, clientId: created.id };
+  return { clientName: created.name, created: true };
 }
 
 async function resolveSalesImportLineProduct(
@@ -1002,24 +1001,13 @@ async function deactivateImportedBrands(brandIds: string[]): Promise<void> {
   );
 }
 
-async function deactivateImportedClients(clientIds: string[]): Promise<void> {
-  const ids = clientIds.filter((id) => Types.ObjectId.isValid(id));
-  if (ids.length === 0) return;
-  await Client.updateMany(
-    { _id: { $in: ids.map((id) => new Types.ObjectId(id)) } },
-    { $set: { isActive: false } }
-  );
-}
-
 async function rollbackSalesImportCreates(input: {
   productIds?: string[];
   brandIds?: string[];
-  clientIds?: string[];
 }): Promise<void> {
   await Promise.all([
     deactivateImportedProducts(input.productIds ?? []),
     deactivateImportedBrands(input.brandIds ?? []),
-    deactivateImportedClients(input.clientIds ?? []),
   ]);
 }
 
@@ -1102,6 +1090,8 @@ function rejectEntireVoucher(
 }
 
 export async function confirmSalesImport(input: SalesImportConfirmInput, user: AuthUser) {
+  const importStartedAt = new Date();
+  const importStartedAtMs = Date.now();
   const lineCount = input.vouchers.reduce((sum, voucher) => sum + voucher.lines.length, 0);
   assertImportRowCount(lineCount, "Sales import confirm");
 
@@ -1179,8 +1169,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     }
 
     let resolvedClientName = draftVoucher.clientName;
-    let voucherCreatedClientId: string | undefined;
-
     const activeLines = voucher.lines.filter((line) => !line.ignore);
     if (activeLines.length === 0) {
       for (const line of voucher.lines) {
@@ -1217,7 +1205,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
         resolvedClientName = resolvedClient.clientName;
         if (resolvedClient.created) {
           createdClientCount++;
-          voucherCreatedClientId = resolvedClient.clientId;
         }
       } catch (err) {
         voucherErrors.push(err instanceof Error ? err.message : "Client resolution failed");
@@ -1273,9 +1260,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       (entry) => !entry.ignored && entry.lineErrors.length > 0
     );
     if (hasValidationFailure) {
-      await rollbackSalesImportCreates({
-        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
-      });
       failedCount += rejectEntireVoucher(
         baseVoucher,
         lineValidations,
@@ -1310,9 +1294,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       }
     }
     if (duplicateMessage) {
-      await rollbackSalesImportCreates({
-        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
-      });
       failedCount += rejectEntireVoucher(
         baseVoucher,
         lineValidations,
@@ -1436,7 +1417,6 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       await rollbackSalesImportCreates({
         productIds: voucherCreatedProductIds,
         brandIds: voucherCreatedBrandIds,
-        clientIds: voucherCreatedClientId ? [voucherCreatedClientId] : [],
       });
       const message = err instanceof Error ? err.message : "Stock out failed";
       failedCount += rejectEntireVoucher(
@@ -1471,6 +1451,9 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
           };
         });
 
+  const importCompletedAt = new Date();
+  const durationMs = Date.now() - importStartedAtMs;
+
   await AuditLog.create({
     action: "SALES_IMPORT",
     entity: "StockMovement",
@@ -1485,6 +1468,9 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       createdProductCount,
       createdBrandCount,
       createdClientCount,
+      startedAt: importStartedAt.toISOString(),
+      completedAt: importCompletedAt.toISOString(),
+      durationMs,
     },
   });
 
@@ -1499,7 +1485,16 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     createdProductCount,
     createdBrandCount,
     createdClientCount,
-    vouchers: voucherResults,
-    rows: lineResults,
+    startedAt: importStartedAt.toISOString(),
+    completedAt: importCompletedAt.toISOString(),
+    durationMs,
+    vouchers: voucherResults.map((voucher) => ({
+      ...voucher,
+      processedAt: importCompletedAt.toISOString(),
+    })),
+    rows: lineResults.map((row) => ({
+      ...row,
+      processedAt: importCompletedAt.toISOString(),
+    })),
   };
 }

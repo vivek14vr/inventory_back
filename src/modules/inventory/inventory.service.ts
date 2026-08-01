@@ -37,6 +37,7 @@ import {
   sortRows,
 } from "../../shared/pagination/pagination.js";
 import type {
+  AddInvoiceProductInput,
   AdjustStockInput,
   InvoiceListQuery,
   LowStockQuery,
@@ -608,6 +609,12 @@ async function healMutatedSaleQuantities(movements: MovementDoc[]) {
       update: { $set: Record<string, number> };
     };
   }> = [];
+  const repairs: Array<{
+    movementId: Types.ObjectId;
+    previousQuantity: number;
+    restoredQuantity: number;
+    invoiceSoldQuantity?: number;
+  }> = [];
 
   for (const m of movements) {
     if (
@@ -620,6 +627,7 @@ async function healMutatedSaleQuantities(movements: MovementDoc[]) {
     const historical = historicalSaleQuantityFromCorrections(m.quantity, notes);
     if (historical === m.quantity) continue;
 
+    const previousQuantity = m.quantity;
     const setFields: Record<string, number> = { quantity: historical };
     if (
       m.invoiceSoldQuantity == null ||
@@ -636,10 +644,32 @@ async function healMutatedSaleQuantities(movements: MovementDoc[]) {
         update: { $set: setFields },
       },
     });
+    repairs.push({
+      movementId: m._id,
+      previousQuantity,
+      restoredQuantity: historical,
+      invoiceSoldQuantity: setFields.invoiceSoldQuantity,
+    });
   }
 
   if (bulk.length > 0) {
     await StockMovement.bulkWrite(bulk, { ordered: false });
+    await AuditLog.insertMany(
+      repairs.map((repair) => ({
+        action: "DATA_REPAIRED",
+        entity: "StockMovement",
+        entityId: repair.movementId,
+        source: "SYSTEM",
+        outcome: "SUCCESS",
+        metadata: {
+          repair: "RESTORE_HISTORICAL_SALE_QUANTITY",
+          previousQuantity: repair.previousQuantity,
+          quantity: repair.restoredQuantity,
+          invoiceSoldQuantity: repair.invoiceSoldQuantity,
+          automatic: true,
+        },
+      }))
+    );
   }
 }
 
@@ -2092,6 +2122,144 @@ export async function listInvoiceGroups(query: InvoiceListQuery) {
 
 export async function searchMovementsForInvoiceFix(query: InvoiceListQuery) {
   return listInvoiceMovements(query);
+}
+
+export async function addProductToSaleInvoice(
+  movementId: string,
+  input: AddInvoiceProductInput,
+  user: AuthUser
+) {
+  if (!Types.ObjectId.isValid(movementId)) {
+    throw new BadRequestError("Invalid movement id");
+  }
+  if (!Types.ObjectId.isValid(input.productId)) {
+    throw new BadRequestError("Invalid product id");
+  }
+
+  return runInTransaction(async (session) => {
+    const anchor = await StockMovement.findById(movementId).session(session ?? null);
+    if (!anchor) {
+      throw new NotFoundError("Stock movement not found");
+    }
+    if (
+      anchor.type !== StockMovementType.STOCK_OUT ||
+      anchor.dispatchType !== DispatchType.DIRECT_SELLING
+    ) {
+      throw new BadRequestError("Products can only be added to client sale invoices");
+    }
+
+    const warehouseId = extractObjectId(anchor.warehouseId);
+    if (!warehouseId) {
+      throw new BadRequestError("Invoice warehouse is invalid");
+    }
+    const warehouse = await Warehouse.findOne({ _id: warehouseId, isActive: true })
+      .session(session ?? null)
+      .lean();
+    if (!warehouse) {
+      throw new NotFoundError("Invoice warehouse not found or inactive");
+    }
+
+    const product = await Product.findOne({ _id: input.productId, isActive: true })
+      .session(session ?? null)
+      .lean();
+    if (!product) {
+      throw new NotFoundError("Product not found or inactive");
+    }
+    const validatedProduct = await balanceService.validateProductForBrand(
+      input.productId,
+      String(product.brandId),
+      session
+    );
+
+    const siblingFilter = saleInvoiceSiblingFilter({
+      invoiceNumber: anchor.invoiceNumber,
+      clientName: anchor.clientName,
+      warehouseId: anchor.warehouseId,
+    });
+    const existingLine = await StockMovement.exists({
+      ...siblingFilter,
+      productId: validatedProduct.productId,
+    }).session(session ?? null);
+    if (existingLine) {
+      throw new BadRequestError(
+        "This product is already on the invoice. Update its quantity instead."
+      );
+    }
+
+    await balanceService.assertSufficientStock(
+      warehouseId,
+      input.productId,
+      input.quantity,
+      session
+    );
+    const balanceAfter = await balanceService.adjustBalance(
+      warehouseId,
+      input.productId,
+      -input.quantity,
+      session
+    );
+
+    await StockMovement.updateMany(siblingFilter, {
+      $inc: { invoiceModificationCount: 1 },
+    }).session(session ?? null);
+
+    const [movement] = await StockMovement.create(
+      [
+        {
+          type: StockMovementType.STOCK_OUT,
+          warehouseId: anchor.warehouseId,
+          productId: validatedProduct.productId,
+          brandId: validatedProduct.brandId,
+          quantity: input.quantity,
+          invoiceSoldQuantity: input.quantity,
+          balanceAfter,
+          dispatchType: DispatchType.DIRECT_SELLING,
+          clientName: anchor.clientName,
+          invoiceNumber: anchor.invoiceNumber,
+          notes: anchor.notes,
+          invoiceModificationCount: 1,
+          createdBy: user.id,
+        },
+      ],
+      dbSession(session)
+    );
+
+    await AuditLog.create(
+      [
+        {
+          action: "INVOICE_UPDATED",
+          entity: "StockMovement",
+          entityId: movement._id,
+          userId: user.id,
+          metadata: {
+            movementId: String(movement._id),
+            movementType: movement.type,
+            productId: String(validatedProduct.productId),
+            productName: validatedProduct.name,
+            brandId: String(validatedProduct.brandId),
+            warehouseId,
+            warehouseName: warehouse.name,
+            warehouseCode: warehouse.code,
+            invoiceNumber: anchor.invoiceNumber,
+            clientName: anchor.clientName,
+            previousQuantity: 0,
+            quantity: input.quantity,
+            inventoryDelta: -input.quantity,
+            addedProduct: true,
+          },
+        },
+      ],
+      dbSession(session)
+    );
+
+    const populated = await StockMovement.findById(movement._id)
+      .populate("productId", "name secondaryName stockUnit unitsPerStockUnit baseUnit")
+      .populate("brandId", "name")
+      .populate("warehouseId", "name code")
+      .session(session ?? null)
+      .lean();
+    return mapMovementRow(populated as MovementDoc);
+  });
 }
 
 export async function updateMovementInvoice(
