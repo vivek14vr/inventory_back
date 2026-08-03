@@ -4,15 +4,11 @@ import {
   ACCESS_TOKEN_COOKIE,
   REFRESH_TOKEN_COOKIE,
 } from "../constants/auth.js";
+import { resolveAuthCookieBaseOptions } from "./authCookieOptions.js";
 import { parseDurationToSeconds } from "./duration.js";
 
 function cookieBaseOptions() {
-  const secure = env.NODE_ENV === "production" || env.AUTH_COOKIE_SECURE;
-  return {
-    secure,
-    sameSite: env.AUTH_COOKIE_SAME_SITE,
-    path: "/",
-  } as const;
+  return resolveAuthCookieBaseOptions(env);
 }
 
 export function setAccessTokenCookie(res: Response, accessToken: string): void {
