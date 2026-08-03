@@ -1158,18 +1158,25 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       sellDate: voucher.sellDate?.trim() ?? "",
       clientAction: voucher.clientAction,
       mergeTargetClientId: voucher.mergeTargetClientId,
+      ignore: voucher.ignore,
     };
 
     const voucherErrors: string[] = [];
     if (!draftVoucher.clientName) voucherErrors.push("Client name is required");
     if (!draftVoucher.invoiceNumber) voucherErrors.push("Invoice number is required");
     if (voucher.lines.length === 0) voucherErrors.push("No product lines to import");
-    if (draftVoucher.clientAction === "merge" && !draftVoucher.mergeTargetClientId) {
+    if (
+      !draftVoucher.ignore &&
+      draftVoucher.clientAction === "merge" &&
+      !draftVoucher.mergeTargetClientId
+    ) {
       voucherErrors.push("Select a client to merge into");
     }
 
     let resolvedClientName = draftVoucher.clientName;
-    const activeLines = voucher.lines.filter((line) => !line.ignore);
+    const activeLines = draftVoucher.ignore
+      ? []
+      : voucher.lines.filter((line) => !line.ignore);
     if (activeLines.length === 0) {
       for (const line of voucher.lines) {
         lineResults.push({

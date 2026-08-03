@@ -1,4 +1,10 @@
 import { z } from "zod";
+import { parseBooleanEnvironmentValue } from "./envParsers.js";
+
+const environmentBoolean = z.preprocess(
+  parseBooleanEnvironmentValue,
+  z.boolean()
+);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
@@ -10,7 +16,7 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().optional(),
   JWT_ACCESS_EXPIRES_IN: z.string().default("15m"),
   JWT_REFRESH_EXPIRES_IN: z.string().default("30d"),
-  AUTH_COOKIE_SECURE: z.coerce.boolean().default(false),
+  AUTH_COOKIE_SECURE: environmentBoolean.default(false),
   AUTH_COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).default("lax"),
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
   /** Rate limit window in ms (default 15 minutes). */
@@ -22,7 +28,7 @@ const envSchema = z.object({
   /** Stricter cap for /auth/login and /auth/refresh (default 40 / 15 min). */
   RATE_LIMIT_MAX_LOGIN: z.coerce.number().int().min(5).default(40),
   /** Set to "true" to disable API rate limiting (not recommended in production). */
-  RATE_LIMIT_DISABLED: z.coerce.boolean().default(false),
+  RATE_LIMIT_DISABLED: environmentBoolean.default(false),
 });
 
 export type Env = z.infer<typeof envSchema>;

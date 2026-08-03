@@ -37,7 +37,7 @@ function formatLog(doc: any, includeResult = false) {
     createdBrandCount: doc.createdBrandCount ?? 0,
     createdClientCount: doc.createdClientCount ?? 0,
     createdAt: doc.createdAt,
-    hasReportFile: Boolean(doc.reportFile),
+    hasReportFile: Boolean(doc.reportFileName || doc.reportFile),
     ...(includeResult ? { result: doc.result } : {}),
   };
 }
@@ -108,9 +108,12 @@ export async function saveGeneratedImportReport(input: {
   return formatLog(doc.toObject());
 }
 
-export async function getStoredImportReport(id: string) {
+export async function getStoredImportReport(id: string, importedBy?: string) {
   if (!Types.ObjectId.isValid(id)) throw new NotFoundError("Import log not found");
-  const doc = await ImportLog.findById(id)
+  const doc = await ImportLog.findOne({
+    _id: id,
+    ...(importedBy ? { importedBy } : {}),
+  })
     .select("reportFile reportFileName reportMimeType")
     .lean();
   if (!doc?.reportFile) {
@@ -128,16 +131,24 @@ export async function getStoredImportReport(id: string) {
   };
 }
 
-export async function getStoredImportReportForAudit(auditId: string) {
+export async function getStoredImportReportForAudit(
+  auditId: string,
+  importedBy?: string
+) {
   if (!Types.ObjectId.isValid(auditId)) throw new NotFoundError("Audit log not found");
   const audit = await AuditLog.findById(auditId).lean();
   if (!audit) throw new NotFoundError("Audit log not found");
 
   if (audit.entityId) {
-    const direct = await ImportLog.findById(audit.entityId)
+    const direct = await ImportLog.findOne({
+      _id: audit.entityId,
+      ...(importedBy ? { importedBy } : {}),
+    })
       .select("reportFile reportFileName reportMimeType")
       .lean();
-    if (direct?.reportFile) return getStoredImportReport(String(direct._id));
+    if (direct?.reportFile) {
+      return getStoredImportReport(String(direct._id), importedBy);
+    }
   }
 
   const changes = (audit.metadata?.changes ?? {}) as Record<string, unknown>;
@@ -151,7 +162,11 @@ export async function getStoredImportReportForAudit(auditId: string) {
   const candidates = await ImportLog.find({
     kind,
     fileName,
-    ...(audit.userId ? { importedBy: audit.userId } : {}),
+    ...(importedBy
+      ? { importedBy }
+      : audit.userId
+        ? { importedBy: audit.userId }
+        : {}),
     reportFile: { $exists: true },
     createdAt: {
       $gte: new Date(audit.createdAt.getTime() - windowMs),
@@ -166,7 +181,7 @@ export async function getStoredImportReportForAudit(auditId: string) {
       Math.abs(b.createdAt.getTime() - audit.createdAt.getTime())
   )[0];
   if (!closest) throw new NotFoundError("Generated Excel file not found for this audit entry");
-  return getStoredImportReport(String(closest._id));
+  return getStoredImportReport(String(closest._id), importedBy);
 }
 
 export async function saveImportLog(
@@ -191,8 +206,9 @@ export async function saveImportLog(
   });
 }
 
-export async function listImportLogs(limit = 100) {
-  const docs = await ImportLog.find()
+export async function listImportLogs(limit = 100, importedBy?: string) {
+  const docs = await ImportLog.find(importedBy ? { importedBy } : {})
+    .select("-reportFile -result")
     .sort({ createdAt: -1 })
     .limit(Math.min(Math.max(limit, 1), 250))
     .populate("importedBy", "name")
@@ -200,9 +216,15 @@ export async function listImportLogs(limit = 100) {
   return docs.map((doc) => formatLog(doc));
 }
 
-export async function getImportLog(id: string) {
+export async function getImportLog(id: string, importedBy?: string) {
   if (!Types.ObjectId.isValid(id)) throw new NotFoundError("Import log not found");
-  const doc = await ImportLog.findById(id).populate("importedBy", "name").lean();
+  const doc = await ImportLog.findOne({
+    _id: id,
+    ...(importedBy ? { importedBy } : {}),
+  })
+    .select("-reportFile")
+    .populate("importedBy", "name")
+    .lean();
   if (!doc) throw new NotFoundError("Import log not found");
   return formatLog(doc, true);
 }

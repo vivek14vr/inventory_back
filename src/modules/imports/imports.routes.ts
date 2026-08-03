@@ -15,6 +15,7 @@ import * as clientImportService from "./clientImport.service.js";
 import * as productImportService from "./productImport.service.js";
 import * as salesImportService from "./salesImport.service.js";
 import * as importLogsService from "./importLogs.service.js";
+import { importReportOwnerFilter } from "./importLogs.authorization.js";
 import {
   clientImportConfirmSchema,
   productImportConfirmSchema,
@@ -175,7 +176,10 @@ router.get(
   }),
   asyncHandler(async (req, res) => {
     const limit = Number(req.query.limit ?? 100);
-    const logs = await importLogsService.listImportLogs(limit);
+    const logs = await importLogsService.listImportLogs(
+      limit,
+      importReportOwnerFilter(req.user!)
+    );
     sendSuccess(res, logs);
   })
 );
@@ -219,7 +223,8 @@ router.get(
   }),
   asyncHandler(async (req, res) => {
     const report = await importLogsService.getStoredImportReportForAudit(
-      String(req.params.auditId)
+      String(req.params.auditId),
+      importReportOwnerFilter(req.user!)
     );
     res.setHeader("Content-Type", report.mimeType);
     res.setHeader(
@@ -236,7 +241,10 @@ router.get(
     allowScopedWithoutWarehouseId: true,
   }),
   asyncHandler(async (req, res) => {
-    const report = await importLogsService.getStoredImportReport(String(req.params.id));
+    const report = await importLogsService.getStoredImportReport(
+      String(req.params.id),
+      importReportOwnerFilter(req.user!)
+    );
     res.setHeader("Content-Type", report.mimeType);
     res.setHeader(
       "Content-Disposition",
@@ -252,7 +260,10 @@ router.get(
     allowScopedWithoutWarehouseId: true,
   }),
   asyncHandler(async (req, res) => {
-    const log = await importLogsService.getImportLog(String(req.params.id));
+    const log = await importLogsService.getImportLog(
+      String(req.params.id),
+      importReportOwnerFilter(req.user!)
+    );
     sendSuccess(res, log);
   })
 );

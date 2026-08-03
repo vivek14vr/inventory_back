@@ -61,10 +61,10 @@ export type ClientImportConfirmRow = z.infer<typeof clientImportConfirmRowSchema
 export const salesImportConfirmLineSchema = z
   .object({
     rowNumber: z.number().int().min(1),
-    productName: z.string().min(1).max(200),
-    brandName: z.string().min(1).max(200),
-    quantity: z.coerce.number().int().min(1),
-    warehouseId: z.string().min(1),
+    productName: z.string().max(200),
+    brandName: z.string().max(200),
+    quantity: z.coerce.number().int(),
+    warehouseId: z.string(),
     ignore: z.boolean().optional().default(false),
     brandAction: z.enum(["merge", "create"]),
     mergeTargetBrandId: z.string().optional(),
@@ -73,6 +73,34 @@ export const salesImportConfirmLineSchema = z
   })
   .superRefine((data, ctx) => {
     if (data.ignore) return;
+    if (!data.productName.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Product name is required",
+        path: ["productName"],
+      });
+    }
+    if (!data.brandName.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Brand name is required",
+        path: ["brandName"],
+      });
+    }
+    if (data.quantity < 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Quantity must be at least 1 unit",
+        path: ["quantity"],
+      });
+    }
+    if (!data.warehouseId.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Warehouse is required",
+        path: ["warehouseId"],
+      });
+    }
     if (data.brandAction === "merge" && !data.mergeTargetBrandId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -99,9 +127,11 @@ export const salesImportConfirmVoucherSchema = z
     invoiceNumber: z.string().min(1).max(100),
     clientAction: z.enum(["merge", "create"]),
     mergeTargetClientId: z.string().optional(),
+    ignore: z.boolean().optional().default(false),
     lines: z.array(salesImportConfirmLineSchema).min(1),
   })
   .superRefine((data, ctx) => {
+    if (data.ignore) return;
     if (data.clientAction === "merge" && !data.mergeTargetClientId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
