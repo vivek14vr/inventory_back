@@ -14,6 +14,7 @@ import * as importsService from "./imports.service.js";
 import * as clientImportService from "./clientImport.service.js";
 import * as productImportService from "./productImport.service.js";
 import * as salesImportService from "./salesImport.service.js";
+import * as importLogsService from "./importLogs.service.js";
 import {
   clientImportConfirmSchema,
   productImportConfirmSchema,
@@ -164,6 +165,95 @@ router.post(
     );
 
     sendSuccess(res, result, 201);
+  })
+);
+
+router.get(
+  "/logs",
+  requireAnyPermission([...anyImportPermission], {
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const limit = Number(req.query.limit ?? 100);
+    const logs = await importLogsService.listImportLogs(limit);
+    sendSuccess(res, logs);
+  })
+);
+
+router.post(
+  "/logs/report",
+  requireAnyPermission([...anyImportPermission], {
+    allowScopedWithoutWarehouseId: true,
+  }),
+  upload.single("report"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw new BadRequestError("Generated Excel report is required");
+    const kind = String(req.body.kind ?? "");
+    if (!(["products", "sales", "clients"] as string[]).includes(kind)) {
+      throw new BadRequestError("Invalid import log kind");
+    }
+    let result: import("./importLogs.service.js").StoredImportResult;
+    try {
+      result = JSON.parse(String(req.body.result ?? ""));
+    } catch {
+      throw new BadRequestError("Import result data is invalid");
+    }
+    const log = await importLogsService.saveGeneratedImportReport({
+      kind: kind as import("../../models/ImportLog.js").ImportLogKind,
+      fileName: String(req.body.fileName ?? req.file.originalname),
+      reportFileName: req.file.originalname,
+      reportMimeType: req.file.mimetype,
+      reportFile: req.file.buffer,
+      result,
+      userId: req.user!.id,
+    });
+    res.locals.auditResponseEntityId = log.id;
+    sendSuccess(res, log, 201);
+  })
+);
+
+router.get(
+  "/logs/audit/:auditId/download",
+  requireAnyPermission([...anyImportPermission, Permission.AUDIT_VIEW], {
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const report = await importLogsService.getStoredImportReportForAudit(
+      String(req.params.auditId)
+    );
+    res.setHeader("Content-Type", report.mimeType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${report.fileName.replace(/["\\\r\n]/g, "-")}"`
+    );
+    res.send(report.file);
+  })
+);
+
+router.get(
+  "/logs/:id/download",
+  requireAnyPermission([...anyImportPermission], {
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const report = await importLogsService.getStoredImportReport(String(req.params.id));
+    res.setHeader("Content-Type", report.mimeType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${report.fileName.replace(/["\\\r\n]/g, "-")}"`
+    );
+    res.send(report.file);
+  })
+);
+
+router.get(
+  "/logs/:id",
+  requireAnyPermission([...anyImportPermission], {
+    allowScopedWithoutWarehouseId: true,
+  }),
+  asyncHandler(async (req, res) => {
+    const log = await importLogsService.getImportLog(String(req.params.id));
+    sendSuccess(res, log);
   })
 );
 

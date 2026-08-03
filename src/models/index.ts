@@ -12,3 +12,4 @@ export {
 export { Transfer, type ITransfer } from "./Transfer.js";
 export { AuditLog, type IAuditLog } from "./AuditLog.js";
 export { TallyImport, type ITallyImport } from "./TallyImport.js";
+export { ImportLog, type IImportLog, type ImportLogKind } from "./ImportLog.js";

@@ -366,11 +366,12 @@ export async function confirmClientImport(input: ClientImportConfirmInput, user:
     },
   });
 
-  return {
+  const result = {
     fileName: input.fileName,
     totalRows: resultRows.length,
     successCount,
     failedCount,
     rows: resultRows,
   };
+  return result;
 }

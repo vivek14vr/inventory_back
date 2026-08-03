@@ -1474,7 +1474,7 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
     },
   });
 
-  return {
+  const result = {
     fileName: input.fileName,
     warehouse: warehouses[0]!,
     warehouses,
@@ -1497,4 +1497,5 @@ export async function confirmSalesImport(input: SalesImportConfirmInput, user: A
       processedAt: importCompletedAt.toISOString(),
     })),
   };
+  return result;
 }

@@ -1061,7 +1061,7 @@ export async function confirmProductImport(
     },
   });
 
-  return {
+  const result = {
     fileName: input.fileName,
     warehouses: warehouses.map((wh) => ({
       id: String(wh._id),
@@ -1073,4 +1073,5 @@ export async function confirmProductImport(
     failedCount,
     rows: results,
   };
+  return result;
 }
