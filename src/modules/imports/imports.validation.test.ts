@@ -62,3 +62,40 @@ test("sales import validation accepts an ignored invoice without merge target", 
   });
   assert.equal(parsed.ignore, true);
 });
+
+test("sales import validation accepts an ignored invoice with blank identifying fields", () => {
+  const parsed = salesImportConfirmVoucherSchema.parse({
+    voucherIndex: 2,
+    headerRowNumber: 8,
+    clientName: "",
+    invoiceNumber: "",
+    clientAction: "create",
+    ignore: true,
+    lines: [{ ...validLine, ignore: true }],
+  });
+
+  assert.equal(parsed.ignore, true);
+  assert.equal(parsed.clientName, "");
+  assert.equal(parsed.invoiceNumber, "");
+});
+
+test("sales import validation identifies blank fields on an active invoice", () => {
+  const parsed = salesImportConfirmVoucherSchema.safeParse({
+    voucherIndex: 2,
+    headerRowNumber: 8,
+    clientName: "   ",
+    invoiceNumber: "",
+    clientAction: "create",
+    lines: [validLine],
+  });
+
+  assert.equal(parsed.success, false);
+  if (parsed.success) return;
+  assert.deepEqual(
+    parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })),
+    [
+      { path: ["clientName"], message: "Client name is required" },
+      { path: ["invoiceNumber"], message: "Invoice number is required" },
+    ]
+  );
+});

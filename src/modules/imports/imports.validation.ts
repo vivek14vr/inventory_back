@@ -122,9 +122,9 @@ export const salesImportConfirmVoucherSchema = z
     voucherIndex: z.number().int().min(1),
     headerRowNumber: z.number().int().min(1),
     sellDate: z.string().max(50).optional(),
-    clientName: z.string().min(1).max(200),
+    clientName: z.string().max(200),
     clientSecondaryName: z.string().max(200).optional(),
-    invoiceNumber: z.string().min(1).max(100),
+    invoiceNumber: z.string().max(100),
     clientAction: z.enum(["merge", "create"]),
     mergeTargetClientId: z.string().optional(),
     ignore: z.boolean().optional().default(false),
@@ -132,6 +132,20 @@ export const salesImportConfirmVoucherSchema = z
   })
   .superRefine((data, ctx) => {
     if (data.ignore) return;
+    if (!data.clientName.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Client name is required",
+        path: ["clientName"],
+      });
+    }
+    if (!data.invoiceNumber.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Invoice number is required",
+        path: ["invoiceNumber"],
+      });
+    }
     if (data.clientAction === "merge" && !data.mergeTargetClientId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
